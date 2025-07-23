@@ -3,7 +3,7 @@
 **HydroNode-Library** is a flexible, secure Arduino C++ library for communicating with the HydroNode IoT backend.
 It is designed to make it easy for makers, hobbyists, and professionals to send sensor data and receive remote control events for actuators in the HydroNode ecosystem.
 
-HydroNode is a next-generation IoT network created by TexhFexLabs, providing reliable and secure sensor data collection, cloud-based automation, and remote actuation via your own backend server.
+HydroNode is a next-generation IoT network created by TexhFexLabs, providing reliable and secure sensor data collection, cloud-based automation, and remote actuation via TexhFexLabs backend server.
 **To use this library, you need a valid API key ("secret"), which will soon be available for purchase in the official HydroNode app for iOS (coming soon to the Apple App Store).**
 
 
