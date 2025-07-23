@@ -1,8 +1,8 @@
 #include <WiFiManager.h>
 #include <HydroNode.h>
 
-#define RELAY_PIN D5
-#define FAN_PIN   D6
+#define RELAY_PIN 5
+#define FAN_PIN   6
 
 HydroNode hydro(
     "your-sensor-id-here",

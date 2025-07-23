@@ -1,8 +1,8 @@
 #include <ESP8266WiFi.h>   // oder #include <WiFi.h> for ESP32
 #include <HydroNode.h>
 
-#define RELAY_PIN D5
-#define FAN_PIN   D6
+#define RELAY_PIN 5
+#define FAN_PIN   6
 
 // WIFI-Credentials
 const char* ssid = "YOUR_WIFI_SSID";
@@ -47,10 +47,12 @@ void setup() {
 
     // *** Initialize HydroNode ***
     hydro.begin();
+    hydro.setJsonBufferSize(256);
 
-    // *** Register event handlers ***
-    hydro.on("pump", HydroNode::bindCallback<int>(pumpCallback));
-    hydro.on("fan",  HydroNode::bindCallback<bool>(fanCallback));
+    // *** Register event handlers for backend commands ***
+    hydro.on("pump", HydroNode::bindCallback<int>(pumpCallback));    // For {"pump": 4000}
+    hydro.on("fan",  HydroNode::bindCallback<bool>(fanCallback));    // For {"fan": 1} or {"fan": 0}
+    // Register any other handlers for backend response keys as needed!
 }
 
 void loop() {

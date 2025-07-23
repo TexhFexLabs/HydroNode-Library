@@ -61,8 +61,12 @@ void HydroNode::sendValue(const char* type, float value) {
     }
 }
 
+void HydroNode::setJsonBufferSize(size_t size) {
+    jsonBufferSize_ = size;
+}
+
 void HydroNode::handleResponse(const String& response) {
-    StaticJsonDocument<256> doc;
+    DynamicJsonDocument doc(jsonBufferSize_);
     DeserializationError err = deserializeJson(doc, response);
     if (err) return;
 

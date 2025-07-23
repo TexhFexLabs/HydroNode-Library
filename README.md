@@ -1,9 +1,9 @@
 # HydroNode-Library
 
-**HydroNode-Library** is a flexible, secure Arduino C++ library for communicating with the HydroNode IoT backend.  
+**HydroNode-Library** is a flexible, secure Arduino C++ library for communicating with the HydroNode IoT backend.
 It is designed to make it easy for makers, hobbyists, and professionals to send sensor data and receive remote control events for actuators in the HydroNode ecosystem.
 
-HydroNode is a next-generation IoT network created by TexhFexLabs, providing reliable and secure sensor data collection, cloud-based automation, and remote actuation via your own backend server.  
+HydroNode is a next-generation IoT network created by TexhFexLabs, providing reliable and secure sensor data collection, cloud-based automation, and remote actuation via your own backend server.
 **To use this library, you need a valid API key ("secret"), which will soon be available for purchase in the official HydroNode app for iOS (coming soon to the Apple App Store).**
 
 
@@ -35,16 +35,21 @@ HydroNode is a next-generation IoT network created by TexhFexLabs, providing rel
 
 ## Installation
 
-1. **Download or clone this repository**  
+1. **Download or clone this repository**
    (or search for "HydroNode-Library" in the Arduino Library Manager once available).
 
-2. **Copy the `HydroNode-Library` folder** into your Arduino `libraries/` directory,  
+2. **Copy the `HydroNode-Library` folder** into your Arduino `libraries/` directory,
    or use PlatformIO's library manager.
 
-3. **Install dependencies:**  
-   - [ArduinoJson](https://github.com/bblanchon/ArduinoJson)
-   - [WiFiManager](https://github.com/tzapu/WiFiManager) *(optional, for WiFi configuration)*
-   - Standard ESP8266/ESP32 Arduino core
+3. **Install dependencies:**
+The following libraries are required (install via Arduino Library Manager or PlatformIO):
+
+- [WiFiManager](https://github.com/tzapu/WiFiManager)
+- [ArduinoJson](https://github.com/bblanchon/ArduinoJson)
+- [ArduinoHttpClient](https://github.com/arduino-libraries/ArduinoHttpClient)
+- [NTPClient](https://github.com/arduino-libraries/NTPClient)
+- [densaugeo/ArduinoBase64](https://github.com/Densaugeo/base64_arduino)
+- [Crypto by Rhys Weatherley](https://github.com/rweather/arduinolibs/tree/master/libraries/Crypto)
 
 ## Getting Started
 
@@ -57,8 +62,8 @@ HydroNode is a next-generation IoT network created by TexhFexLabs, providing rel
 #include <WiFiManager.h>
 #include <HydroNode.h>
 
-#define RELAY_PIN D5
-#define FAN_PIN   D6
+#define RELAY_PIN 5
+#define FAN_PIN   6
 
 // Instantiate HydroNode with your unique sensor ID and secret key
 HydroNode hydro(
@@ -117,8 +122,8 @@ For developers who prefer to set SSID/password directly in code:
 #include <ESP8266WiFi.h> // Or #include <WiFi.h> for ESP32
 #include <HydroNode.h>
 
-#define RELAY_PIN D5
-#define FAN_PIN   D6
+#define RELAY_PIN 5
+#define FAN_PIN   6
 
 const char* ssid = "YOUR_WIFI_SSID";
 const char* password = "YOUR_WIFI_PASSWORD";
@@ -188,6 +193,28 @@ void alarmCallback(String msg) {
 }
 hydro.on("alarm", HydroNode::bindCallback<String>(alarmCallback));
 ```
+
+### Advanced: set max response size
+
+#### Example Response Size
+
+If two commands are sent via the app, the backend responds with:
+```json
+{"pump":1200,"fan":1}
+```
+
+This JSON string is 23 bytes long (including braces, quotes, colons, and commas).
+ArduinoJson also needs a bit of extra buffer for internal parsing, but for simple responses like this,
+a buffer size of 128 bytes is always sufficient.
+
+#### setJsonBufferSize(size_t size)
+
+Allows you to configure the internal JSON buffer size used for parsing backend responses.
+Useful if your backend sends larger or more complex JSON objects. Default is 128 bytes.
+
+#### Tip
+For 2–4 simple commands like the example above, 128 bytes is always enough.
+If you send more keys or longer messages, increase the buffer (e.g. 256 bytes) to avoid parsing errors.
 
 
 ## How the HydroNode Network Works
