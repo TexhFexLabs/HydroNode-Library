@@ -38,11 +38,8 @@ HydroNode is a next-generation IoT network created by TexhFexLabs, providing rel
 1. **Download or clone this repository**
    (or search for "HydroNode-Library" in the Arduino Library Manager once available).
 
-2. **Copy the `HydroNode-Library` folder** into your Arduino `libraries/` directory,
-   or use PlatformIO's library manager.
-
-3. **Install dependencies:**
-The following libraries are required (install via Arduino Library Manager or PlatformIO):
+2. **Install dependencies:**
+The following libraries are required (install via Arduino Library Manager):
 
 - [WiFiManager](https://github.com/tzapu/WiFiManager)
 - [ArduinoJson](https://github.com/bblanchon/ArduinoJson)
