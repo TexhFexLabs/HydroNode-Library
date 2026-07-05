@@ -1,248 +1,175 @@
-# HydroNode-Library
+<p align="center">
+  <img src="assets/hydronode-logo.svg" alt="HydroNode" width="140">
+</p>
 
-**HydroNode-Library** is a flexible, secure Arduino C++ library for communicating with the HydroNode IoT backend.
-It is designed to make it easy for makers, hobbyists, and professionals to send sensor data and receive remote control events for actuators in the HydroNode ecosystem.
+<h1 align="center">HydroNode-Library</h1>
 
-HydroNode is a next-generation IoT network created by TexhFexLabs, providing reliable and secure sensor data collection, cloud-based automation, and remote actuation via TexhFexLabs backend server.
-**To use this library, you need a valid API key ("secret"), which will soon be available for purchase in the official HydroNode app for iOS (coming soon to the Apple App Store).**
+<p align="center">
+  Arduino/ESP32 client for the <strong>HydroNode</strong> IoT backend by TexhFexLabs.<br>
+  Signed sensor uploads, TLS out of the box, backend command callbacks — in three lines of code.
+</p>
 
+---
+
+```cpp
+HydroNode hydro("sensor-id", "secret-key");
+hydro.connectWiFi("ssid", "password");
+hydro.sendValue("TEMPERATURE", 21.5);
+```
+
+HydroNode is a secure IoT network by TexhFexLabs for hydroponics, weather stations and environmental monitoring: cloud data collection, anomaly detection, automation and remote actuation. To use it you need a sensor ID and secret key from the official **HydroNode iOS app**.
 
 ## Features
 
-- **Secure, authenticated data upload** to your HydroNode backend, using HMAC-SHA256 signing.
-- **Callback/event system:** easily define actions for remote actuator commands (like `"pump"`, `"fan"`, `"led"`, etc.).
-- **Simple, flexible API:** add any sensor, actuator, or custom event with a single line of code.
-- **WiFi agnostic:** works with both WiFiManager (captive portal setup) and hard-coded credentials.
-- **Fully compatible** with ESP8266, ESP32, and other WiFi-enabled Arduino boards.
-- **Lightweight** and RAM-efficient (optimized for microcontrollers).
-- **Open source under MIT License**.
+- **Secure by default** — every request is signed with HMAC-SHA256 and sent over TLS. The root CA bundle ships with the library (valid until 2035+), no certificate handling needed.
+- **Replay protection built in** — the backend only accepts requests within a ±2 minute window; the library syncs time via NTP automatically before every send.
+- **Backend commands** — react to commands like `{"pump": 4000, "fan": 1}` with simple typed callbacks.
+- **WiFi your way** — use the built-in `connectWiFi()` helper, a WiFiManager captive portal, or your own connection management. The library never touches WiFi unless you ask it to.
+- **Honest error reporting** — `sendValue()` returns the HTTP status code or a descriptive error code, so your firmware can retry intelligently.
+- **Lightweight** — no background tasks, no heap surprises, RAM-friendly.
 
-
-## Table of Contents
-
-- [Installation](#installation)
-- [Getting Started](#getting-started)
-  - [WiFiManager Setup (Recommended)](#wifimanager-setup-recommended)
-  - [Manual WiFi Setup](#manual-wifi-setup)
-- [Usage](#usage)
-  - [Sending Sensor Data](#sending-sensor-data)
-  - [Handling Backend Events (Callbacks)](#handling-backend-events-callbacks)
-  - [Advanced: Custom Events and Types](#advanced-custom-events-and-types)
-- [How the HydroNode Network Works](#how-the-hydronode-network-works)
-- [Obtaining an API Key](#obtaining-an-api-key)
-- [License](#license)
-
+**Board support: ESP32 (all variants).** The library uses the ESP32 TLS API (`WiFiClientSecure::setCACert`); ESP8266 is not supported.
 
 ## Installation
 
-1. **Download or clone this repository**
-   (or search for "HydroNode-Library" in the Arduino Library Manager once available).
+1. Install the library (Arduino IDE → Sketch → Include Library → Add .ZIP Library, or clone this repo into your `libraries/` folder).
+2. Install the dependencies via the Arduino Library Manager:
 
-2. **Install dependencies:**
-The following libraries are required (install via Arduino Library Manager):
+| Library | Purpose |
+|---|---|
+| [ArduinoJson](https://github.com/bblanchon/ArduinoJson) | Parsing backend responses |
+| [ArduinoHttpClient](https://github.com/arduino-libraries/ArduinoHttpClient) | HTTP transport |
+| [NTPClient](https://github.com/arduino-libraries/NTPClient) | Time sync (required for signatures) |
+| [base64_arduino](https://github.com/Densaugeo/base64_arduino) (Densaugeo) | Signature encoding |
+| [Crypto](https://github.com/rweather/arduinolibs) (Rhys Weatherley) | SHA-256 |
+| [WiFiManager](https://github.com/tzapu/WiFiManager) (tzapu) | Only for the captive-portal example |
 
-- [WiFiManager](https://github.com/tzapu/WiFiManager)
-- [ArduinoJson](https://github.com/bblanchon/ArduinoJson)
-- [ArduinoHttpClient](https://github.com/arduino-libraries/ArduinoHttpClient)
-- [NTPClient](https://github.com/arduino-libraries/NTPClient)
-- [densaugeo/ArduinoBase64](https://github.com/Densaugeo/base64_arduino)
-- [Crypto by Rhys Weatherley](https://github.com/rweather/arduinolibs/tree/master/libraries/Crypto)
+## Quick Start
 
-## Getting Started
-
-### WiFiManager Setup (Recommended)
-
-**This method allows end-users to configure WiFi credentials over a captive portal, no hardcoding required.**
+The complete minimal sketch — fill in four values, wire your sensor into `readMySensor()`, flash:
 
 ```cpp
-#include <Wire.h>
-#include <WiFiManager.h>
 #include <HydroNode.h>
 
-#define RELAY_PIN 5
-#define FAN_PIN   6
+const char* WIFI_SSID     = "YOUR_WIFI_SSID";
+const char* WIFI_PASSWORD = "YOUR_WIFI_PASSWORD";
+const char* SENSOR_ID     = "your-sensor-id-here";    // from the HydroNode app
+const char* SECRET_KEY    = "your-secret-key-here";   // from the HydroNode app
 
-// Instantiate HydroNode with your unique sensor ID and secret key
-HydroNode hydro(
-    "your-sensor-id-here",
-    "your-secret-key-here"
-);
+HydroNode hydro(SENSOR_ID, SECRET_KEY);
 
-// Optional: actuator callbacks
-void pumpCallback(int ms) {
-    digitalWrite(RELAY_PIN, HIGH);
-    delay(ms);
-    digitalWrite(RELAY_PIN, LOW);
-}
-
-void fanCallback(bool on) {
-    digitalWrite(FAN_PIN, on ? LOW : HIGH);
+float readMySensor() {
+    return 21.5;  // TODO: your real measurement (DHT22, BME280, analog probe, ...)
 }
 
 void setup() {
     Serial.begin(115200);
-    pinMode(RELAY_PIN, OUTPUT);
-    digitalWrite(RELAY_PIN, LOW);
-    pinMode(FAN_PIN, OUTPUT);
-    digitalWrite(FAN_PIN, HIGH);
+    hydro.setDebug(Serial);  // optional
 
-    // WiFiManager: user-friendly AP setup for WiFi credentials
-    WiFiManager wm;
-    String apName = hydro.getApName(); // "HydroNode-Setup-XXXX"
-    bool res = wm.autoConnect(apName.c_str());
-    if (!res) {
-        Serial.println("WiFi failed, restarting");
-        delay(3000);
-        ESP.restart();
+    while (!hydro.connectWiFi(WIFI_SSID, WIFI_PASSWORD)) {
+        Serial.println("WiFi failed, retrying...");
     }
-
     hydro.begin();
-
-    // Register event handlers
-    hydro.on("pump", HydroNode::bindCallback<int>(pumpCallback));
-    hydro.on("fan",  HydroNode::bindCallback<bool>(fanCallback));
 }
 
 void loop() {
-    // Example: send temperature
-    hydro.sendValue("temperature", 22.3);
-    delay(10000);
+    hydro.sendValue("TEMPERATURE", readMySensor());
+    delay(10000);  // backend enforces min. 9 s between submissions
 }
 ```
 
+## Examples
 
-### Manual WiFi Setup
+All examples are complete sketches — open them via *File → Examples → HydroNode-Library*:
 
-For developers who prefer to set SSID/password directly in code:
+| Example | What it shows |
+|---|---|
+| **QuickStart** | Smallest complete sketch. Built-in WiFi helper, one sensor, done. |
+| **WiFiManagerSetup** | No hardcoded WiFi: captive portal (`HydroNode-Setup-XXXX`) for end-user WiFi configuration. |
+| **ExternalWiFi** | You own the WiFi lifecycle (custom reconnect logic); full error handling for every `sendValue()` result. |
+| **ActuatorControl** | Backend commands drive a pump and a fan via callbacks; alternating sensor types within the rate limit. |
+
+## Choosing a WiFi strategy
+
+The library is deliberately WiFi-agnostic. Pick what fits:
+
+1. **Built-in helper** — `hydro.connectWiFi(ssid, pass)` connects in station mode and blocks until connected (30 s default timeout, configurable). Great for simple firmware.
+2. **WiFiManager captive portal** — no credentials in code. Use `hydro.getApName()` for a per-device AP name. Great for devices you hand to end users.
+3. **Fully external** — connect however you like (ESP-IDF events, enterprise WPA2, ethernet). The library only requires that WiFi is up when you call `sendValue()`; if it isn't, you get `ERR_WIFI_DISCONNECTED` instead of a hang.
+
+## API Reference
+
+### `HydroNode(sensorId, secretKey, host?, path?)`
+Constructor. `host` defaults to `hydronode.texhfexlabs.de`, `path` to `/api/webhook/sensor-value`.
+
+### `void begin()`
+Starts the NTP client. Call once in `setup()` after WiFi is available.
+
+### `bool connectWiFi(ssid, password, timeoutMs = 30000)`
+Optional WiFi helper. Returns `false` on timeout.
+
+### `int sendValue(const char* type, float value)`
+Sends one signed measurement. Returns the HTTP status code, or a negative error:
+
+| Return | Meaning | What to do |
+|---|---|---|
+| `202` | Accepted | Nothing — data is queued for processing |
+| `ERR_WIFI_DISCONNECTED` (−1) | WiFi down | Reconnect, retry |
+| `ERR_TIME_NOT_SYNCED` (−2) | NTP failed | Check internet/UDP 123; signature would be rejected without valid time |
+| `ERR_CONNECTION_FAILED` (−3) | TLS/TCP/transport error | Retry with backoff |
+| `401` | Bad signature or timestamp | Check sensor ID + secret key |
+| `429` | Rate limited | Min. 9 s between submissions per sensor — slow down |
+
+`value` is transmitted with exactly 2 decimal places.
+
+Common `type` values: `TEMPERATURE`, `HUMIDITY`, `PRESSURE`, `CO2`, `PM25`, `PM10`, `VOC`, `SOIL_MOISTURE`, `SOIL_TEMPERATURE`, `WATER_TEMPERATURE`, `WATER_PH`, `WATER_EC`, `BATTERY_VOLTAGE` — see the HydroNode app for the full list.
+
+### `void on(key, handler)` — backend command callbacks
+When the backend response contains JSON like `{"pump": 4000, "fan": 1}`, registered handlers are called with the value:
 
 ```cpp
-#include <ESP8266WiFi.h> // Or #include <WiFi.h> for ESP32
-#include <HydroNode.h>
+void pumpCallback(int ms)  { /* run pump for ms */ }
+void fanCallback(bool on)  { /* switch fan */ }
 
-#define RELAY_PIN 5
-#define FAN_PIN   6
-
-const char* ssid = "YOUR_WIFI_SSID";
-const char* password = "YOUR_WIFI_PASSWORD";
-
-HydroNode hydro("your-sensor-id-here", "your-secret-key-here");
-
-void setup() {
-    Serial.begin(115200);
-    pinMode(RELAY_PIN, OUTPUT);
-    digitalWrite(RELAY_PIN, LOW);
-    pinMode(FAN_PIN, OUTPUT);
-    digitalWrite(FAN_PIN, HIGH);
-
-    // Standard WiFi connect
-    WiFi.mode(WIFI_STA);
-    WiFi.begin(ssid, password);
-    while (WiFi.status() != WL_CONNECTED) {
-        delay(500);
-        Serial.print(".");
-    }
-    Serial.println("\nWiFi connected!");
-
-    hydro.begin();
-    // ...register callbacks as above
-}
-```
-
-## Usage
-
-### Sending Sensor Data
-
-Send any sensor value to your HydroNode backend with:
-
-```cpp
-hydro.sendValue("type", value);
-```
-Examples:
-```cpp
-hydro.sendValue("temperature", 21.5);
-hydro.sendValue("humidity", 43.2);
-hydro.sendValue("soil", analogRead(SOIL_PIN));
-```
-
-### Handling Backend Events (Callbacks)
-
-When your backend sends commands in its JSON response, you can react with callbacks:
-```cpp
-void pumpCallback(int ms) {
-    // e.g., turn relay on for ms milliseconds
-}
 hydro.on("pump", HydroNode::bindCallback<int>(pumpCallback));
-
-// Supports any type: int, bool, String, etc.
-void ledCallback(bool state) { /* ... */ }
-hydro.on("led", HydroNode::bindCallback<bool>(ledCallback));
+hydro.on("fan",  HydroNode::bindCallback<bool>(fanCallback));
 ```
 
-The library automatically calls your function when a matching key is found in the backend response.
+`bindCallback<T>` supports any JSON-convertible type: `int`, `bool`, `float`, `String`, …
 
-### Advanced: Custom Events and Types
+### Tuning
 
-You can add as many handlers as you want for any backend key.
+| Method | Default | Purpose |
+|---|---|---|
+| `setDebug(Serial)` | off | Log WiFi/NTP/HTTP activity to any `Stream` |
+| `setHttpTimeout(ms)` | 10000 | HTTP response timeout |
+| `setJsonBufferSize(bytes)` | 128 | Response parse buffer; raise to 256+ for many/large commands |
+| `getApName()` | — | `"HydroNode-Setup-XXXX"` (last 4 chars of sensor ID), for WiFiManager |
 
-```cpp
-void alarmCallback(String msg) {
-    Serial.println(msg);
-}
-hydro.on("alarm", HydroNode::bindCallback<String>(alarmCallback));
-```
+## Security model
 
-### Advanced: set max response size
+- **Authentication**: every request carries `X-Signature` = Base64(HMAC-SHA256(payload + timestamp)) computed with your secret key. The key never leaves the device.
+- **Replay protection**: `X-Timestamp` must be within ±2 minutes of server time. The library syncs via NTP before each send and refuses to transmit with an unsynced clock (`ERR_TIME_NOT_SYNCED`) instead of sending a doomed request.
+- **Transport**: TLS 1.2+ against a bundled root CA set (Google Trust Services, ISRG/Let's Encrypt, SSL.com — the roots Cloudflare Universal SSL chains to). All bundled roots are valid until at least 2035, so certificate rotation on the server side never requires a reflash.
+- **Rate limiting**: the backend accepts max. one submission per sensor per 9 seconds.
 
-#### Example Response Size
+## Troubleshooting
 
-If two commands are sent via the app, the backend responds with:
-```json
-{"pump":1200,"fan":1}
-```
+| Symptom | Likely cause |
+|---|---|
+| `ERR_TIME_NOT_SYNCED` | No internet access or UDP port 123 blocked — NTP can't sync |
+| `401` | Wrong secret key/sensor ID, or device clock drifted outside the ±2 min window |
+| `429` | Sending faster than every 9 s (also applies when alternating types) |
+| `ERR_CONNECTION_FAILED` | DNS/TLS/network issue — enable `setDebug(Serial)` and check the log |
+| Compile error on ESP8266 | Not supported — the library requires an ESP32 |
 
-This JSON string is 23 bytes long (including braces, quotes, colons, and commas).
-ArduinoJson also needs a bit of extra buffer for internal parsing, but for simple responses like this,
-a buffer size of 128 bytes is always sufficient.
+## Obtaining an API key
 
-#### setJsonBufferSize(size_t size)
-
-Allows you to configure the internal JSON buffer size used for parsing backend responses.
-Useful if your backend sends larger or more complex JSON objects. Default is 128 bytes.
-
-#### Tip
-For 2–4 simple commands like the example above, 128 bytes is always enough.
-If you send more keys or longer messages, increase the buffer (e.g. 256 bytes) to avoid parsing errors.
-
-
-## How the HydroNode Network Works
-
-The HydroNode ecosystem allows you to connect microcontroller-based sensors and actuators to a secure cloud backend, designed and operated by TexhFexLabs. Each device identifies itself with a unique sensor ID and authenticates all traffic using a secret key and HMAC-SHA256 signatures.
-
-Your HydroNode backend URL is:
-
-https://hydronode.texhfexlabs.de/api/webhook/sensor-value
-
-* Data is only accepted from devices with valid credentials.
-* To use this network, you must purchase an access key via the official HydroNode app (coming soon to the Apple App Store).
-
-Typical Use Cases:
-
-* Remote monitoring of temperature, humidity, air quality, soil moisture, and more.
-* Secure control of relays, fans, pumps, LEDs, etc. via backend commands.
-* Cloud-based rules/automation possible via backend logic.
-
-
-## Obtaining an API Key
-
-To protect the HydroNode cloud network, all access requires a unique secret key.
-
-* These keys will be available for purchase soon via the official HydroNode iOS app.
-* For development/testing, contact contact@knollfelix.de for a trial key.
-
+All access to the HydroNode network requires a sensor ID and secret key, available via the official **HydroNode iOS app**. For development or trial keys, contact **contact@knollfelix.de**.
 
 ## License
 
-This project is licensed under the MIT License – see the LICENSE file for details.
+MIT — see [LICENSE](LICENSE).
 
-HydroNode-Library is developed and maintained by TexhFexLabs.
-For support, feature requests, or business inquiries, please contact contact@knollfelix.de.
+HydroNode-Library is developed and maintained by **TexhFexLabs**.
+Support, feature requests, business inquiries: contact@knollfelix.de

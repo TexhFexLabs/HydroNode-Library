@@ -1,0 +1,28 @@
+#######################################
+# Syntax coloring for HydroNode-Library
+#######################################
+
+#######################################
+# Datatypes (KEYWORD1)
+#######################################
+HydroNode	KEYWORD1
+
+#######################################
+# Methods and Functions (KEYWORD2)
+#######################################
+begin	KEYWORD2
+connectWiFi	KEYWORD2
+sendValue	KEYWORD2
+on	KEYWORD2
+getApName	KEYWORD2
+setJsonBufferSize	KEYWORD2
+setHttpTimeout	KEYWORD2
+setDebug	KEYWORD2
+bindCallback	KEYWORD2
+
+#######################################
+# Constants (LITERAL1)
+#######################################
+ERR_WIFI_DISCONNECTED	LITERAL1
+ERR_TIME_NOT_SYNCED	LITERAL1
+ERR_CONNECTION_FAILED	LITERAL1
