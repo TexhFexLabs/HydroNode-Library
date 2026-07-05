@@ -77,15 +77,20 @@ public:
     int sendValue(const char* type, float value);
 
     /**
-     * Register a callback for a key in the backend response, e.g.
+     * Register a callback for a backend command key, e.g.
      * hydro.on("pump", HydroNode::bindCallback<int>(pumpCallback));
+     *
+     * Commands are delivered in the response of sendValue() as
+     * {"commands":[{"id":"...","command":"pump","value":4000}]}.
+     * The library acknowledges receipt to the backend (signed) before
+     * dispatching, so the HydroNode app shows commands as confirmed.
      */
     void on(const String& key, std::function<void(JsonVariant)> handler);
 
     /** Captive-portal AP name for WiFiManager: "HydroNode-Setup-<last 4 of sensor id>". */
     String getApName() const;
 
-    /** Buffer size for parsing backend responses (default 128 bytes). */
+    /** Buffer size for parsing backend responses (default 1024 bytes). */
     void setJsonBufferSize(size_t size);
 
     /** HTTP response timeout in milliseconds (default 10000). */
@@ -105,7 +110,8 @@ private:
     const char* secretKey_;
     const char* host_;
     const char* path_;
-    size_t jsonBufferSize_ = 128;
+    const char* ackPath_ = "/api/webhook/sensor-command-ack";
+    size_t jsonBufferSize_ = 1024;
     uint32_t httpTimeoutMs_ = 10000;
     int httpsPort_ = 443;
     Stream* debug_ = nullptr;
@@ -118,6 +124,9 @@ private:
     bool ensureTimeSynced(unsigned long& epochOut);
     void hmac_sha256(const uint8_t* key, size_t keylen, const uint8_t* data, size_t datalen, uint8_t* out);
     String toBase64(const uint8_t* input, size_t len);
+    String sign(const String& message);
+    int postSigned(const char* path, const String& payload, unsigned long epoch, String& responseOut);
     void handleResponse(const String& response);
+    bool sendAck(const String& commandIdsJson);
     void dbg(const String& msg);
 };

@@ -23,7 +23,7 @@ HydroNode is a secure IoT network by TexhFexLabs for hydroponics, weather statio
 
 - **Secure by default** — every request is signed with HMAC-SHA256 and sent over TLS. The root CA bundle ships with the library (valid until 2035+), no certificate handling needed.
 - **Replay protection built in** — the backend only accepts requests within a ±2 minute window; the library syncs time via NTP automatically before every send.
-- **Backend commands** — react to commands like `{"pump": 4000, "fan": 1}` with simple typed callbacks.
+- **Backend commands with delivery confirmation** — react to commands queued in the HydroNode app with simple typed callbacks. The library automatically acknowledges receipt (signed), so the app shows every command as *Confirmed*.
 - **WiFi your way** — use the built-in `connectWiFi()` helper, a WiFiManager captive portal, or your own connection management. The library never touches WiFi unless you ask it to.
 - **Honest error reporting** — `sendValue()` returns the HTTP status code or a descriptive error code, so your firmware can retry intelligently.
 - **Lightweight** — no background tasks, no heap surprises, RAM-friendly.
@@ -125,7 +125,13 @@ Sends one signed measurement. Returns the HTTP status code, or a negative error:
 Common `type` values: `TEMPERATURE`, `HUMIDITY`, `PRESSURE`, `CO2`, `PM25`, `PM10`, `VOC`, `SOIL_MOISTURE`, `SOIL_TEMPERATURE`, `WATER_TEMPERATURE`, `WATER_PH`, `WATER_EC`, `BATTERY_VOLTAGE` — see the HydroNode app for the full list.
 
 ### `void on(key, handler)` — backend command callbacks
-When the backend response contains JSON like `{"pump": 4000, "fan": 1}`, registered handlers are called with the value:
+Commands queued for your sensor (via the HydroNode app or API) are delivered in the response of `sendValue()`:
+
+```json
+{"commands":[{"id":"6f9c...","command":"pump","value":4000},{"id":"a1b2...","command":"fan","value":true}]}
+```
+
+Registered handlers are called with the value:
 
 ```cpp
 void pumpCallback(int ms)  { /* run pump for ms */ }
@@ -137,18 +143,21 @@ hydro.on("fan",  HydroNode::bindCallback<bool>(fanCallback));
 
 `bindCallback<T>` supports any JSON-convertible type: `int`, `bool`, `float`, `String`, …
 
+**Delivery confirmation:** before dispatching, the library sends a signed acknowledgment to the backend (`/api/webhook/sensor-command-ack`). Commands then show up as *Confirmed* in the HydroNode app. This happens automatically — nothing to configure.
+
 ### Tuning
 
 | Method | Default | Purpose |
 |---|---|---|
 | `setDebug(Serial)` | off | Log WiFi/NTP/HTTP activity to any `Stream` |
 | `setHttpTimeout(ms)` | 10000 | HTTP response timeout |
-| `setJsonBufferSize(bytes)` | 128 | Response parse buffer; raise to 256+ for many/large commands |
+| `setJsonBufferSize(bytes)` | 1024 | Response parse buffer; enough for ~8 commands per delivery |
 | `getApName()` | — | `"HydroNode-Setup-XXXX"` (last 4 chars of sensor ID), for WiFiManager |
 
 ## Security model
 
-- **Authentication**: every request carries `X-Signature` = Base64(HMAC-SHA256(payload + timestamp)) computed with your secret key. The key never leaves the device.
+- **Authentication**: every request (values and command ACKs) carries `X-Signature` = Base64(HMAC-SHA256(payload + timestamp)) computed with your secret key. The key never leaves the device.
+- **Command delivery**: the backend hands out queued commands only in responses to correctly signed value submissions — an attacker who knows your sensor ID cannot fetch them.
 - **Replay protection**: `X-Timestamp` must be within ±2 minutes of server time. The library syncs via NTP before each send and refuses to transmit with an unsynced clock (`ERR_TIME_NOT_SYNCED`) instead of sending a doomed request.
 - **Transport**: TLS 1.2+ against a bundled root CA set (Google Trust Services, ISRG/Let's Encrypt, SSL.com — the roots Cloudflare Universal SSL chains to). All bundled roots are valid until at least 2035, so certificate rotation on the server side never requires a reflash.
 - **Rate limiting**: the backend accepts max. one submission per sensor per 9 seconds.

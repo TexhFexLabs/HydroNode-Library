@@ -99,36 +99,9 @@ int HydroNode::sendValue(const char* type, float value) {
     // Payload format is part of the HMAC contract with the backend —
     // key order, 2 decimal places and zero whitespace must not change.
     String payload = "{\"sensorId\":\"" + String(sensorId_) + "\",\"type\":\"" + type + "\",\"value\":" + String(value, 2) + ",\"timestamp\":" + String(epoch) + "}";
-    String msg = payload + String(epoch);
 
-    uint8_t hmacResult[32];
-    hmac_sha256(
-        (const uint8_t*)secretKey_, strlen(secretKey_),
-        (const uint8_t*)msg.c_str(), msg.length(),
-        hmacResult
-    );
-    String signature = toBase64(hmacResult, 32);
-
-    WiFiClientSecure client;
-    client.setCACert(HYDRONODE_CA_BUNDLE);
-
-    HttpClient http(client, host_, httpsPort_);
-    http.setHttpResponseTimeout(httpTimeoutMs_);
-    http.beginRequest();
-    http.post(path_);
-    http.sendHeader("Content-Type", "application/json");
-    http.sendHeader("X-Sensor-Id", sensorId_);
-    http.sendHeader("X-Timestamp", String(epoch));
-    http.sendHeader("X-Signature", signature);
-    http.sendHeader("Content-Length", payload.length());
-    http.beginBody();
-    http.print(payload);
-    http.endRequest();
-
-    int statusCode = http.responseStatusCode();
-    String response = http.responseBody();
-    http.stop();
-
+    String response;
+    int statusCode = postSigned(path_, payload, epoch, response);
     if (statusCode <= 0) {
         dbg("sendValue: transport error " + String(statusCode));
         return ERR_CONNECTION_FAILED;
@@ -142,6 +115,12 @@ int HydroNode::sendValue(const char* type, float value) {
     return statusCode;
 }
 
+/**
+ * Response format: {"commands":[{"id":"...","command":"pump","value":4000}]}
+ * Receipt is acknowledged to the backend BEFORE dispatching, so a
+ * long-running handler (e.g. pump with delay) cannot push the ACK
+ * outside the backend's replay window.
+ */
 void HydroNode::handleResponse(const String& response) {
     DynamicJsonDocument doc(jsonBufferSize_);
     DeserializationError err = deserializeJson(doc, response);
@@ -150,13 +129,85 @@ void HydroNode::handleResponse(const String& response) {
         return;
     }
 
-    for (JsonPair kv : doc.as<JsonObject>()) {
-        String key = kv.key().c_str();
-        auto it = handlers_.find(key);
+    JsonArray commands = doc["commands"].as<JsonArray>();
+    if (commands.isNull() || commands.size() == 0) {
+        return;
+    }
+
+    // 1. Acknowledge receipt of everything we successfully parsed
+    String idsJson;
+    for (JsonObject cmd : commands) {
+        const char* id = cmd["id"];
+        if (!id) continue;
+        if (idsJson.length() > 0) idsJson += ",";
+        idsJson += "\"" + String(id) + "\"";
+    }
+    if (idsJson.length() > 0) {
+        sendAck(idsJson);
+    }
+
+    // 2. Dispatch to registered handlers
+    for (JsonObject cmd : commands) {
+        const char* key = cmd["command"];
+        if (!key) continue;
+        auto it = handlers_.find(String(key));
         if (it != handlers_.end()) {
-            it->second(kv.value());
+            dbg("command: " + String(key));
+            it->second(cmd["value"]);
+        } else {
+            dbg("command: no handler registered for '" + String(key) + "'");
         }
     }
+}
+
+bool HydroNode::sendAck(const String& commandIdsJson) {
+    unsigned long epoch = timeClient_.getEpochTime();
+    String payload = "{\"sensorId\":\"" + String(sensorId_) + "\",\"commandIds\":[" + commandIdsJson + "]}";
+
+    String response;
+    int statusCode = postSigned(ackPath_, payload, epoch, response);
+    if (statusCode != 200) {
+        dbg("sendAck: failed with " + String(statusCode));
+        return false;
+    }
+    dbg("sendAck: confirmed");
+    return true;
+}
+
+/** POST a payload with HMAC headers (signature = HMAC(payload + epoch)). */
+int HydroNode::postSigned(const char* path, const String& payload, unsigned long epoch, String& responseOut) {
+    String signature = sign(payload + String(epoch));
+
+    WiFiClientSecure client;
+    client.setCACert(HYDRONODE_CA_BUNDLE);
+
+    HttpClient http(client, host_, httpsPort_);
+    http.setHttpResponseTimeout(httpTimeoutMs_);
+    http.beginRequest();
+    http.post(path);
+    http.sendHeader("Content-Type", "application/json");
+    http.sendHeader("X-Sensor-Id", sensorId_);
+    http.sendHeader("X-Timestamp", String(epoch));
+    http.sendHeader("X-Signature", signature);
+    http.sendHeader("Content-Length", payload.length());
+    http.beginBody();
+    http.print(payload);
+    http.endRequest();
+
+    int statusCode = http.responseStatusCode();
+    responseOut = http.responseBody();
+    http.stop();
+    return statusCode;
+}
+
+String HydroNode::sign(const String& message) {
+    uint8_t hmacResult[32];
+    hmac_sha256(
+        (const uint8_t*)secretKey_, strlen(secretKey_),
+        (const uint8_t*)message.c_str(), message.length(),
+        hmacResult
+    );
+    return toBase64(hmacResult, 32);
 }
 
 void HydroNode::hmac_sha256(const uint8_t* key, size_t keylen, const uint8_t* data, size_t datalen, uint8_t* out) {
