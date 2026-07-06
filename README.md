@@ -172,9 +172,13 @@ hydro.on("fan",  HydroNode::bindCallback<bool>(fanCallback));
 | `ERR_CONNECTION_FAILED` | DNS/TLS/network issue — enable `setDebug(Serial)` and check the log |
 | Compile error on ESP8266 | Not supported — the library requires an ESP32 |
 
-## Obtaining an API key
+## Obtaining Sensor Credentials
 
-All access to the HydroNode network requires a sensor ID and secret key, available via the official **HydroNode iOS app**. For development or trial keys, contact **contact@knollfelix.de**.
+All access to the HydroNode network requires a sensor ID and secret key. **Sensor registration is currently free of charge** — create a sensor with just a name in the HydroNode iOS app or web app and you'll receive its UUID and secret immediately. No activation code purchase needed.
+
+The activation-code system still exists for backward compatibility; previously purchased codes remain redeemable, but new sensors are created directly and at no cost. If running costs grow, a small fee may be introduced later.
+
+For development or trial setups, contact **contact@knollfelix.de**.
 
 ## License
 
