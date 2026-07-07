@@ -9,6 +9,21 @@
   Signed sensor uploads, TLS out of the box, backend command callbacks — in three lines of code.
 </p>
 
+<p align="center">
+  <a href="https://www.ardu-badge.com/HydroNode-Library"><img src="https://www.ardu-badge.com/badge/HydroNode-Library.svg" alt="Arduino Library Manager"></a>
+  <a href="https://github.com/TexhFexLabs/HydroNode-Library/releases/latest"><img src="https://img.shields.io/github/v/release/TexhFexLabs/HydroNode-Library?label=release&color=2ea44f" alt="Latest release"></a>
+  <img src="https://img.shields.io/badge/platform-ESP32-e7352c.svg" alt="ESP32">
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="MIT license"></a>
+</p>
+
+<p align="center">
+  <a href="https://hydronode.texhfexlabs.de/"><strong>Website</strong></a> ·
+  <a href="https://hydronode.texhfexlabs.de/docs/guide/arduino/">Arduino Guide</a> ·
+  <a href="https://hydronode.texhfexlabs.de/docs/guide/sensor-types/">Sensor Types</a> ·
+  <a href="https://hydronode.texhfexlabs.de/docs/faq/">FAQ</a> ·
+  <a href="https://github.com/TexhFexLabs/hydronode-homeassistant">Home Assistant Integration</a>
+</p>
+
 ---
 
 ```cpp
@@ -17,7 +32,7 @@ hydro.connectWiFi("ssid", "password");
 hydro.sendValue("TEMPERATURE", 21.5);
 ```
 
-HydroNode is a secure IoT network by TexhFexLabs for hydroponics, weather stations and environmental monitoring: cloud data collection, anomaly detection, automation and remote actuation. To use it you need a sensor ID and secret key from the official **HydroNode iOS app**.
+[HydroNode](https://hydronode.texhfexlabs.de/) is a secure IoT platform by TexhFexLabs for hydroponics, weather stations and environmental monitoring: cloud data collection, anomaly detection, AI analysis, automation and remote actuation. To use it you need a sensor ID and secret key from the [HydroNode web app](https://hydronode.texhfexlabs.de/) or the iOS app. Creating sensors is free, no activation code needed.
 
 ## Features
 
@@ -32,8 +47,13 @@ HydroNode is a secure IoT network by TexhFexLabs for hydroponics, weather statio
 
 ## Installation
 
-1. Install the library (Arduino IDE → Sketch → Include Library → Add .ZIP Library, or clone this repo into your `libraries/` folder).
-2. Install the dependencies via the Arduino Library Manager:
+### Arduino Library Manager (recommended)
+
+Arduino IDE → **Tools → Manage Libraries** → search for **HydroNode-Library** → Install. The IDE offers to install all dependencies automatically.
+
+### Manual
+
+Install the library via Arduino IDE → Sketch → Include Library → Add .ZIP Library, or clone this repo into your `libraries/` folder. Then install the dependencies via the Library Manager:
 
 | Library | Purpose |
 |---|---|
@@ -122,7 +142,7 @@ Sends one signed measurement. Returns the HTTP status code, or a negative error:
 
 `value` is transmitted with exactly 2 decimal places.
 
-Common `type` values: `TEMPERATURE`, `HUMIDITY`, `PRESSURE`, `CO2`, `PM25`, `PM10`, `VOC`, `SOIL_MOISTURE`, `SOIL_TEMPERATURE`, `WATER_TEMPERATURE`, `WATER_PH`, `WATER_EC`, `BATTERY_VOLTAGE` — see the HydroNode app for the full list.
+Common `type` values: `TEMPERATURE`, `HUMIDITY`, `PRESSURE`, `CO2`, `PM25`, `PM10`, `VOC`, `SOIL_MOISTURE`, `SOIL_TEMPERATURE`, `WATER_TEMPERATURE`, `WATER_PH`, `WATER_EC`, `BATTERY_VOLTAGE` — see the [sensor type reference](https://hydronode.texhfexlabs.de/docs/guide/sensor-types/) for the full list of 30+ types with units and scales.
 
 ### `void on(key, handler)` — backend command callbacks
 Commands queued for your sensor (via the HydroNode app or API) are delivered in the response of `sendValue()`:
@@ -174,11 +194,18 @@ hydro.on("fan",  HydroNode::bindCallback<bool>(fanCallback));
 
 ## Obtaining Sensor Credentials
 
-All access to the HydroNode network requires a sensor ID and secret key. **Sensor registration is currently free of charge** — create a sensor with just a name in the HydroNode iOS app or web app and you'll receive its UUID and secret immediately. No activation code purchase needed.
+All access to the HydroNode network requires a sensor ID and secret key. **Sensor registration is currently free of charge** — create a sensor with just a name in the [HydroNode web app](https://hydronode.texhfexlabs.de/) or the iOS app and you'll receive its UUID and secret immediately. No activation code purchase needed.
 
 The activation-code system still exists for backward compatibility; previously purchased codes remain redeemable, but new sensors are created directly and at no cost. If running costs grow, a small fee may be introduced later.
 
 For development or trial setups, contact **contact@knollfelix.de**.
+
+## Related
+
+- [HydroNode website & docs](https://hydronode.texhfexlabs.de/) — dashboard, guides, FAQ
+- [Getting started with Arduino/ESP32](https://hydronode.texhfexlabs.de/docs/guide/arduino/) — step-by-step guide for this library
+- [LoRaWAN integration](https://hydronode.texhfexlabs.de/docs/guide/lorawan/) — battery-powered sensors without WiFi
+- [Home Assistant integration](https://github.com/TexhFexLabs/hydronode-homeassistant) — your HydroNode sensors as native HA entities (HACS)
 
 ## License
 
