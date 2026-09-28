@@ -1,5 +1,8 @@
 #pragma once
-// Root CA bundle for hydronode.texhfexlabs.de (behind Cloudflare).
+// Root CA bundle for hydronode.tech (behind Cloudflare). The legacy host
+// hydronode.texhfexlabs.de sits behind the same Cloudflare setup and works too.
+// The ESP32 Arduino core speaks TLS 1.2 only, so the host must keep
+// accepting TLS 1.2 (Cloudflare: SSL/TLS, Edge Certificates, Minimum TLS Version).
 // Cloudflare Universal SSL rotates between Google Trust Services,
 // Let's Encrypt and SSL.com on certificate renewal (~90 days), and
 // serves both ECDSA and RSA chains. Pinning a single root therefore
