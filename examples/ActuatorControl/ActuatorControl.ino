@@ -2,13 +2,16 @@
  * HydroNode ActuatorControl: react to backend commands.
  *
  * Commands you queue in the HydroNode app travel back in the response of
- * the next sendValue() call:
+ * the next sendValue() call. Each command has a name, a value type and a
+ * value. Register one callback per name with the type you picked in the app:
  *
- *   {"commands":[{"id":"...","command":"pump","value":4000},
- *                {"id":"...","command":"fan","value":true}]}
+ *   App: name "pump", type UINT32, value 4000  ->  hydro.onUInt32("pump", ...)
+ *   App: name "fan",  type BOOL,   value true  ->  hydro.onBool("fan", ...)
+ *   App: name "co2_calibration", type UINT32, value 0x20124
+ *                                              ->  hydro.onUInt32("co2_calibration", ...)
  *
- * The library confirms receipt to the backend and then calls the handler
- * you registered with hydro.on(...) for each command name.
+ * A command without a matching callback, or with a different type, is not
+ * run. The app shows it as declined with the reason.
  *
  * This example reports temperature and humidity every 10 seconds and
  * drives a pump relay and a fan from backend commands.
@@ -32,22 +35,22 @@ const int MAX_PUMP_MS = 10000;
 
 HydroNode hydro(SENSOR_ID, SECRET_KEY);
 
-// {"command":"pump","value":4000} -> run the pump for 4000 ms
-void pumpCallback(int ms) {
-    if (ms <= 0) {
+// "pump" (UINT32): run the pump for the given milliseconds
+void pumpCallback(uint32_t ms) {
+    if (ms == 0) {
         return;
     }
-    if (ms > MAX_PUMP_MS) {
-        Serial.printf("Command: pump %d ms requested, limited to %d ms\n", ms, MAX_PUMP_MS);
+    if (ms > (uint32_t)MAX_PUMP_MS) {
+        Serial.printf("Command: pump %lu ms requested, limited to %d ms\n", (unsigned long)ms, MAX_PUMP_MS);
         ms = MAX_PUMP_MS;
     }
-    Serial.printf("Command: pump for %d ms\n", ms);
+    Serial.printf("Command: pump for %lu ms\n", (unsigned long)ms);
     digitalWrite(PUMP_RELAY_PIN, HIGH);
     delay(ms);
     digitalWrite(PUMP_RELAY_PIN, LOW);
 }
 
-// {"command":"fan","value":true} -> fan on, false -> fan off (active-low relay)
+// "fan" (BOOL): true -> fan on, false -> fan off (active-low relay)
 void fanCallback(bool on) {
     Serial.printf("Command: fan %s\n", on ? "on" : "off");
     digitalWrite(FAN_PIN, on ? LOW : HIGH);
@@ -70,10 +73,15 @@ void setup() {
     }
     hydro.begin();
 
-    // Register a handler per command name. Any JSON type works:
-    // int, bool, float, String. bindCallback converts automatically.
-    hydro.on("pump", HydroNode::bindCallback<int>(pumpCallback));
-    hydro.on("fan",  HydroNode::bindCallback<bool>(fanCallback));
+    // One callback per command name. The type must match the app.
+    hydro.onUInt32("pump", pumpCallback);
+    hydro.onBool("fan", fanCallback);
+
+    // Lambdas work too, e.g. a calibration register sent as 0x20124:
+    hydro.onUInt32("co2_calibration", [](uint32_t value) {
+        Serial.printf("Command: CO2 calibration 0x%lX\n", (unsigned long)value);
+        // co2Sensor.setCalibration(value);
+    });
 }
 
 void loop() {

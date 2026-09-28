@@ -81,13 +81,29 @@ public:
     int sendValue(const char* type, float value);
 
     /**
-     * Register a callback for a backend command key, e.g.
-     * hydro.on("pump", HydroNode::bindCallback<int>(pumpCallback));
+     * Command callbacks. Register one per command name with the value type
+     * you expect; the type must match what you pick in the HydroNode app.
      *
-     * Commands are delivered in the response of sendValue() as
-     * {"commands":[{"id":"...","command":"pump","value":4000}]}.
-     * The library acknowledges receipt to the backend (signed) before
-     * dispatching, so the HydroNode app shows commands as confirmed.
+     *   hydro.onBool("lamp", [](bool on) { digitalWrite(LAMP_PIN, on); });
+     *   hydro.onUInt32("co2_calibration", [](uint32_t v) { sensor.calibrate(v); });
+     *
+     * Commands arrive in the response of sendValue(). Before any callback
+     * runs, the library answers the backend (signed): commands with a
+     * matching callback are confirmed, all others are declined with a reason
+     * (NO_HANDLER, TYPE_MISMATCH, INVALID_VALUE) that the app shows.
+     */
+    void onBool(const String& key, std::function<void(bool)> handler);
+    void onInt32(const String& key, std::function<void(int32_t)> handler);
+    void onUInt32(const String& key, std::function<void(uint32_t)> handler);
+    void onInt64(const String& key, std::function<void(int64_t)> handler);
+    void onUInt64(const String& key, std::function<void(uint64_t)> handler);
+    void onString(const String& key, std::function<void(const String&)> handler);
+
+    /**
+     * Untyped callback that receives the raw JSON value of any type, e.g. for
+     * commands that accept several types. Also keeps sketches written for
+     * library versions up to 1.2.0 working:
+     *   hydro.on("pump", HydroNode::bindCallback<int>(pumpCallback));
      */
     void on(const String& key, std::function<void(JsonVariant)> handler);
 
@@ -107,7 +123,11 @@ public:
     /** Enable debug logging, e.g. hydro.setDebug(Serial). */
     void setDebug(Stream& stream);
 
-    /** Wraps a plain function into a JsonVariant handler with automatic type conversion. */
+    /**
+     * Wraps a plain function into an untyped handler with ArduinoJson's lenient
+     * conversion. Kept for sketches from version 1.2.0 and older; new code
+     * should use the typed onBool(), onUInt32(), ... which reject wrong types.
+     */
     template<typename T>
     static std::function<void(JsonVariant)> bindCallback(void (*fn)(T)) {
         return [fn](JsonVariant v) { fn(v.as<T>()); };
@@ -124,7 +144,14 @@ private:
     int httpsPort_ = 443;
     Stream* debug_ = nullptr;
 
-    std::map<String, std::function<void(JsonVariant)>> handlers_;
+    enum class ValueType : uint8_t { ANY, BOOL, INT32, UINT32, INT64, UINT64, STRING };
+
+    struct Handler {
+        ValueType type;
+        std::function<void(JsonVariant)> fn;
+    };
+
+    std::map<String, Handler> handlers_;
 
     WiFiUDP ntpUDP_;
     NTPClient timeClient_;
@@ -134,6 +161,7 @@ private:
     String sign(const String& message);
     int postSigned(const char* path, const String& payload, unsigned long epoch, String& responseOut);
     void handleResponse(const String& response);
-    bool sendAck(const String& commandIdsJson);
+    static const char* checkCommand(const Handler& handler, const char* wireType, JsonVariant value);
+    bool sendAck(JsonArrayConst accepted, JsonArrayConst declined);
     void dbg(const String& msg);
 };

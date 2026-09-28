@@ -38,7 +38,7 @@ hydro.sendValue("TEMPERATURE", 21.5);
 
 - **Secure by default** — every request is signed with HMAC-SHA256 and sent over TLS. The root CA bundle ships with the library (valid until 2035+), no certificate handling needed.
 - **Replay protection built in** — the backend only accepts requests within a ±2 minute window; the library syncs time via NTP automatically before every send.
-- **Backend commands with delivery confirmation** — react to commands queued in the HydroNode app with simple typed callbacks. The library automatically acknowledges receipt (signed), so the app shows every command as *Confirmed*.
+- **Typed backend commands** — switch a lamp, run a pump or write a calibration value from the HydroNode app. Each command has a value type (`BOOL`, `INT32`, `UINT32`, `INT64`, `UINT64`, `STRING`) that must match your callback. The app shows every command as *Confirmed* or *Declined* with the reason.
 - **WiFi your way** — use the built-in `connectWiFi()` helper, a WiFiManager captive portal, or your own connection management. The library never touches WiFi unless you ask it to.
 - **Honest error reporting** — `sendValue()` returns the HTTP status code or a descriptive error code, so your firmware can retry intelligently.
 - **Lightweight** — no background tasks, no heap surprises, RAM-friendly.
@@ -149,26 +149,58 @@ Sends one signed measurement. Returns the HTTP status code, or a negative error:
 
 `type` must start with an upper case letter and may contain `A`–`Z`, `0`–`9` and `_`, at most 64 characters. The library checks this before sending. Common `type` values: `TEMPERATURE`, `HUMIDITY`, `PRESSURE`, `CO2`, `PM25`, `PM10`, `VOC`, `SOIL_MOISTURE`, `SOIL_TEMPERATURE`, `WATER_TEMPERATURE`, `WATER_PH`, `WATER_EC`, `BATTERY_VOLTAGE` — see the [sensor type reference](https://hydronode.tech/docs/guide/sensor-types/) for the full list of 30+ types with units and scales.
 
-### `void on(key, handler)` — backend command callbacks
-Commands queued for your sensor (via the HydroNode app or API) are delivered in the response of `sendValue()`:
+### Commands: `onBool`, `onInt32`, `onUInt32`, `onInt64`, `onUInt64`, `onString`
 
-```json
-{"commands":[{"id":"6f9c...","command":"pump","value":4000},{"id":"a1b2...","command":"fan","value":true}]}
-```
+In the HydroNode app you send a command to your device with a **name**, a **value type** and a **value**, for example:
 
-Registered handlers are called with the value:
+| Name | Type | Value | Use |
+|---|---|---|---|
+| `lamp` | `BOOL` | `true` / `false` | Switch a relay |
+| `pump` | `UINT32` | `4000` | Run a pump for 4000 ms |
+| `co2_calibration` | `UINT32` | `0x20124` | Write a calibration register (hex is fine) |
+| `offset` | `INT32` | `-15` | Signed setting, e.g. tenths of a degree |
+| `display` | `STRING` | `Hello` | Show text |
+
+On the device you register one callback per name with the same type:
 
 ```cpp
-void pumpCallback(int ms)  { /* run pump for ms */ }
-void fanCallback(bool on)  { /* switch fan */ }
-
-hydro.on("pump", HydroNode::bindCallback<int>(pumpCallback));
-hydro.on("fan",  HydroNode::bindCallback<bool>(fanCallback));
+hydro.onBool("lamp", [](bool on) { digitalWrite(LAMP_PIN, on); });
+hydro.onUInt32("pump", [](uint32_t ms) { runPump(ms > 10000 ? 10000 : ms); });
+hydro.onUInt32("co2_calibration", [](uint32_t value) { co2.setCalibration(value); });
+hydro.onInt32("offset", [](int32_t tenths) { offset = tenths / 10.0; });
+hydro.onString("display", [](const String& text) { lcd.print(text); });
 ```
 
-`bindCallback<T>` supports any JSON-convertible type: `int`, `bool`, `float`, `String`, …
+| Type | Callback | Range |
+|---|---|---|
+| `BOOL` | `onBool(name, void(bool))` | `true`, `false` |
+| `INT32` | `onInt32(name, void(int32_t))` | −2147483648 to 2147483647 |
+| `UINT32` | `onUInt32(name, void(uint32_t))` | 0 to 4294967295 |
+| `INT64` | `onInt64(name, void(int64_t))` | full signed 64-bit range |
+| `UINT64` | `onUInt64(name, void(uint64_t))` | full unsigned 64-bit range |
+| `STRING` | `onString(name, void(const String&))` | text up to about 500 characters |
 
-**Delivery confirmation:** before dispatching, the library sends a signed acknowledgment to the backend (`/api/webhook/sensor-command-ack`). Commands then show up as *Confirmed* in the HydroNode app. This happens automatically — nothing to configure.
+There is no float type on purpose: send a whole number in a fixed unit (tenths, milliseconds, ...) so the app and the device agree on the exact value.
+
+**What the app shows.** Before any callback runs, the library answers the backend with a signed request:
+
+| Status in the app | Meaning |
+|---|---|
+| *Confirmed* | A callback with the matching type exists and runs now |
+| *Declined: no handler* | No callback is registered for this name. Check the spelling |
+| *Declined: type mismatch* | A callback exists, but for a different type than the one picked in the app |
+| *Declined: invalid value* | The value does not fit the type, e.g. `-1` for `UINT32` |
+
+A declined command is never run. Commands without a type (sent by older app versions) run when the value fits the callback's type.
+
+**Timing and safety.**
+
+- Commands arrive with the next `sendValue()`. If your device sends every 5 minutes, a command may take up to 5 minutes to arrive. Unpicked commands expire after 24 hours.
+- Every command is delivered at most once. If the response is lost on the way, the command is not repeated; send it again from the app.
+- Values come over the network. Clamp them to what your hardware can safely do, as the `ActuatorControl` example does for the pump.
+- Callbacks run one after another inside `sendValue()`. Long blocking work (like `delay()` in a pump callback) delays your next measurement.
+
+**Untyped callbacks.** `on(name, void(JsonVariant))` receives any value without a type check, for commands that accept several types. Sketches written for version 1.2.0 and older (`hydro.on("pump", HydroNode::bindCallback<int>(pumpCallback))`) keep compiling and working.
 
 ### Tuning
 
