@@ -64,16 +64,26 @@ void loop() {
         case 202:
             break;  // accepted
         case HydroNode::ERR_TIME_NOT_SYNCED:
-            Serial.println("NTP sync failed — check internet access");
+            Serial.println("NTP sync failed: check internet access");
             break;
         case HydroNode::ERR_CONNECTION_FAILED:
             Serial.println("Could not reach the backend");
             break;
+        case HydroNode::ERR_INVALID_TYPE:
+        case HydroNode::ERR_INVALID_VALUE:
+            Serial.println("Bad input: type must be like TEMPERATURE, value must be a number");
+            break;
+        case 400:
+            Serial.println("Rejected as malformed, enable setDebug(Serial) for details");
+            break;
         case 401:
-            Serial.println("Rejected — check sensor id / secret key");
+            Serial.println("Rejected: check sensor id and secret key");
             break;
         case 429:
-            Serial.println("Too fast — min. 9 s between submissions");
+            Serial.println("Too fast: one value per type every 10 s");
+            break;
+        case 503:
+            Serial.println("Backend busy, the next cycle retries automatically");
             break;
         default:
             Serial.printf("Unexpected result: %d\n", status);

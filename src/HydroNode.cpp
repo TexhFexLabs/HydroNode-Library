@@ -1,8 +1,11 @@
 #include "HydroNode.h"
-#include <base64.hpp>
-#include <SHA256.h>
+#include <math.h>
+#include <string.h>
+#include <vector>
 #include <time.h>
 #include <sys/time.h>
+#include <mbedtls/md.h>
+#include <mbedtls/base64.h>
 
 // Epoch sanity floor: any synced clock is past 2020-09-13. Values below
 // mean the NTP sync never happened and the system clock is still at 1970.
@@ -42,7 +45,33 @@ String HydroNode::getApName() const {
 }
 
 void HydroNode::on(const String& key, std::function<void(JsonVariant)> handler) {
-    handlers_[key] = handler;
+    handlers_[key] = Handler{ValueType::ANY, handler};
+}
+
+// Typed callbacks only run after checkCommand() has confirmed that the value
+// fits the type, so the as<T>() conversions below never truncate or guess.
+void HydroNode::onBool(const String& key, std::function<void(bool)> handler) {
+    handlers_[key] = Handler{ValueType::BOOL, [handler](JsonVariant v) { handler(v.as<bool>()); }};
+}
+
+void HydroNode::onInt32(const String& key, std::function<void(int32_t)> handler) {
+    handlers_[key] = Handler{ValueType::INT32, [handler](JsonVariant v) { handler(v.as<int32_t>()); }};
+}
+
+void HydroNode::onUInt32(const String& key, std::function<void(uint32_t)> handler) {
+    handlers_[key] = Handler{ValueType::UINT32, [handler](JsonVariant v) { handler(v.as<uint32_t>()); }};
+}
+
+void HydroNode::onInt64(const String& key, std::function<void(int64_t)> handler) {
+    handlers_[key] = Handler{ValueType::INT64, [handler](JsonVariant v) { handler(v.as<int64_t>()); }};
+}
+
+void HydroNode::onUInt64(const String& key, std::function<void(uint64_t)> handler) {
+    handlers_[key] = Handler{ValueType::UINT64, [handler](JsonVariant v) { handler(v.as<uint64_t>()); }};
+}
+
+void HydroNode::onString(const String& key, std::function<void(const String&)> handler) {
+    handlers_[key] = Handler{ValueType::STRING, [handler](JsonVariant v) { handler(String(v.as<const char*>())); }};
 }
 
 void HydroNode::setJsonBufferSize(size_t size) {
@@ -85,6 +114,17 @@ bool HydroNode::ensureTimeSynced(unsigned long& epochOut) {
 }
 
 int HydroNode::sendValue(const char* type, float value) {
+    // Checked before any network work: the backend rejects both with 400,
+    // so sending them would only cost a TLS handshake.
+    if (!isValidType(type)) {
+        dbg("sendValue: invalid type '" + String(type ? type : "") + "' (use A-Z, 0-9, _ like TEMPERATURE)");
+        return ERR_INVALID_TYPE;
+    }
+    if (!isfinite(value)) {
+        dbg("sendValue: value is NaN or infinite, check the sensor reading");
+        return ERR_INVALID_VALUE;
+    }
+
     if (WiFi.status() != WL_CONNECTED) {
         dbg("sendValue: WiFi not connected");
         return ERR_WIFI_DISCONNECTED;
@@ -116,16 +156,24 @@ int HydroNode::sendValue(const char* type, float value) {
 }
 
 /**
- * Response format: {"commands":[{"id":"...","command":"pump","value":4000}]}
- * Receipt is acknowledged to the backend BEFORE dispatching, so a
- * long-running handler (e.g. pump with delay) cannot push the ACK
- * outside the backend's replay window.
+ * Response format:
+ *   {"commands":[{"id":"...","command":"lamp","type":"BOOL","value":true}]}
+ * "type" is missing for untyped commands from older app versions.
+ *
+ * The answer to the backend (confirmed and declined IDs) goes out BEFORE any
+ * callback runs, so a long-running handler (e.g. a pump with delay) cannot
+ * push it outside the backend's replay window.
  */
 void HydroNode::handleResponse(const String& response) {
-    DynamicJsonDocument doc(jsonBufferSize_);
+    if (response.length() > jsonBufferSize_) {
+        dbg("handleResponse: response of " + String(response.length()) + " bytes exceeds the limit, consider setJsonBufferSize()");
+        return;
+    }
+
+    JsonDocument doc;
     DeserializationError err = deserializeJson(doc, response);
     if (err) {
-        dbg("handleResponse: JSON parse failed (" + String(err.c_str()) + "), consider setJsonBufferSize()");
+        dbg("handleResponse: JSON parse failed (" + String(err.c_str()) + ")");
         return;
     }
 
@@ -134,49 +182,107 @@ void HydroNode::handleResponse(const String& response) {
         return;
     }
 
-    // 1. Acknowledge receipt of everything we successfully parsed
-    String idsJson;
+    // 1. Decide per command: run it, or decline it with a reason.
+    JsonDocument answer;
+    JsonArray accepted = answer["accepted"].to<JsonArray>();
+    JsonArray declined = answer["declined"].to<JsonArray>();
+    std::vector<std::pair<JsonObject, const Handler*>> toRun;
+
     for (JsonObject cmd : commands) {
         const char* id = cmd["id"];
-        if (!id) continue;
-        if (idsJson.length() > 0) idsJson += ",";
-        idsJson += "\"" + String(id) + "\"";
-    }
-    if (idsJson.length() > 0) {
-        sendAck(idsJson);
+        const char* key = cmd["command"];
+        if (!id || !key) continue;
+
+        const char* reason = nullptr;
+        auto it = handlers_.find(String(key));
+        if (it == handlers_.end()) {
+            reason = "NO_HANDLER";
+        } else {
+            reason = checkCommand(it->second, cmd["type"], cmd["value"]);
+        }
+
+        if (reason) {
+            dbg("command '" + String(key) + "' declined: " + reason);
+            JsonObject entry = declined.add<JsonObject>();
+            entry["id"] = id;
+            entry["reason"] = reason;
+        } else {
+            accepted.add(id);
+            toRun.emplace_back(cmd, &it->second);
+        }
     }
 
-    // 2. Dispatch to registered handlers
-    for (JsonObject cmd : commands) {
-        const char* key = cmd["command"];
-        if (!key) continue;
-        auto it = handlers_.find(String(key));
-        if (it != handlers_.end()) {
-            dbg("command: " + String(key));
-            it->second(cmd["value"]);
-        } else {
-            dbg("command: no handler registered for '" + String(key) + "'");
-        }
+    // 2. Tell the backend, then run the accepted callbacks in delivery order.
+    if (accepted.size() > 0 || declined.size() > 0) {
+        sendAck(accepted, declined);
+    }
+    for (auto& entry : toRun) {
+        dbg("command: " + String(entry.first["command"].as<const char*>()));
+        entry.second->fn(entry.first["value"]);
     }
 }
 
-bool HydroNode::sendAck(const String& commandIdsJson) {
-    unsigned long epoch = timeClient_.getEpochTime();
-    String payload = "{\"sensorId\":\"" + String(sensorId_) + "\",\"commandIds\":[" + commandIdsJson + "]}";
+/**
+ * Returns nullptr if the handler can take the command, otherwise the decline
+ * reason. A typed command must name exactly the handler's type. An untyped
+ * command (older app versions) is accepted when the value itself fits.
+ */
+const char* HydroNode::checkCommand(const Handler& handler, const char* wireType, JsonVariant value) {
+    static const char* const NAMES[] = {"ANY", "BOOL", "INT32", "UINT32", "INT64", "UINT64", "STRING"};
 
+    if (handler.type == ValueType::ANY) {
+        return nullptr;
+    }
+    const char* expected = NAMES[static_cast<uint8_t>(handler.type)];
+    if (wireType && strcmp(wireType, expected) != 0) {
+        return "TYPE_MISMATCH";
+    }
+
+    bool fits = false;
+    switch (handler.type) {
+        case ValueType::BOOL:   fits = value.is<bool>(); break;
+        case ValueType::INT32:  fits = value.is<int32_t>(); break;
+        case ValueType::UINT32: fits = value.is<uint32_t>(); break;
+        case ValueType::INT64:  fits = value.is<int64_t>(); break;
+        case ValueType::UINT64: fits = value.is<uint64_t>(); break;
+        case ValueType::STRING: fits = value.is<const char*>(); break;
+        case ValueType::ANY:    fits = true; break;
+    }
+    if (fits) {
+        return nullptr;
+    }
+    // With a matching declared type the value itself is wrong; without a
+    // declared type we cannot tell, so it counts as the wrong type.
+    return wireType ? "INVALID_VALUE" : "TYPE_MISMATCH";
+}
+
+bool HydroNode::sendAck(JsonArrayConst accepted, JsonArrayConst declined) {
+    JsonDocument doc;
+    doc["sensorId"] = sensorId_;
+    doc["commandIds"] = accepted;
+    if (declined.size() > 0) {
+        doc["declined"] = declined;
+    }
+    String payload;
+    serializeJson(doc, payload);
+
+    unsigned long epoch = timeClient_.getEpochTime();
     String response;
     int statusCode = postSigned(ackPath_, payload, epoch, response);
     if (statusCode != 200) {
         dbg("sendAck: failed with " + String(statusCode));
         return false;
     }
-    dbg("sendAck: confirmed");
+    dbg("sendAck: " + String(accepted.size()) + " confirmed, " + String(declined.size()) + " declined");
     return true;
 }
 
 /** POST a payload with HMAC headers (signature = HMAC(payload + epoch)). */
 int HydroNode::postSigned(const char* path, const String& payload, unsigned long epoch, String& responseOut) {
     String signature = sign(payload + String(epoch));
+    if (signature.length() == 0) {
+        return ERR_CONNECTION_FAILED;
+    }
 
     WiFiClientSecure client;
     client.setCACert(HYDRONODE_CA_BUNDLE);
@@ -200,49 +306,41 @@ int HydroNode::postSigned(const char* path, const String& payload, unsigned long
     return statusCode;
 }
 
+bool HydroNode::isValidType(const char* type) {
+    // Mirrors the backend rule [A-Z][A-Z0-9_]{0,63}.
+    if (!type || type[0] < 'A' || type[0] > 'Z') return false;
+    size_t len = 1;
+    for (const char* c = type + 1; *c; c++, len++) {
+        bool ok = (*c >= 'A' && *c <= 'Z') || (*c >= '0' && *c <= '9') || *c == '_';
+        if (!ok || len >= 64) return false;
+    }
+    return true;
+}
+
+/** Base64(HMAC-SHA256(secretKey, message)), computed with the mbedTLS built into the ESP32 core. */
 String HydroNode::sign(const String& message) {
-    uint8_t hmacResult[32];
-    hmac_sha256(
-        (const uint8_t*)secretKey_, strlen(secretKey_),
-        (const uint8_t*)message.c_str(), message.length(),
-        hmacResult
+    uint8_t mac[32];
+    const mbedtls_md_info_t* sha256 = mbedtls_md_info_from_type(MBEDTLS_MD_SHA256);
+    int rc = mbedtls_md_hmac(
+        sha256,
+        (const unsigned char*)secretKey_, strlen(secretKey_),
+        (const unsigned char*)message.c_str(), message.length(),
+        mac
     );
-    return toBase64(hmacResult, 32);
-}
-
-void HydroNode::hmac_sha256(const uint8_t* key, size_t keylen, const uint8_t* data, size_t datalen, uint8_t* out) {
-    const uint8_t blocksize = 64;
-    uint8_t keyblock[blocksize] = {0};
-    if (keylen > blocksize) {
-        SHA256 hasher;
-        hasher.reset();
-        hasher.update(key, keylen);
-        hasher.finalize(keyblock, 32);
-    } else {
-        memcpy(keyblock, key, keylen);
+    if (rc != 0) {
+        dbg("sign: HMAC failed (" + String(rc) + ")");
+        return String();
     }
-    uint8_t o_key_pad[blocksize], i_key_pad[blocksize];
-    for (uint8_t i = 0; i < blocksize; i++) {
-        o_key_pad[i] = keyblock[i] ^ 0x5c;
-        i_key_pad[i] = keyblock[i] ^ 0x36;
-    }
-    SHA256 inner;
-    inner.reset();
-    inner.update(i_key_pad, blocksize);
-    inner.update(data, datalen);
-    uint8_t innerhash[32];
-    inner.finalize(innerhash, 32);
-    SHA256 outer;
-    outer.reset();
-    outer.update(o_key_pad, blocksize);
-    outer.update(innerhash, 32);
-    outer.finalize(out, 32);
-}
 
-String HydroNode::toBase64(const uint8_t* input, size_t len) {
-    unsigned char encoded[48] = {0};
-    encode_base64(const_cast<uint8_t*>(input), len, encoded);
-    return String((char*)encoded);
+    unsigned char encoded[45];  // 32 bytes -> 44 Base64 characters + terminator
+    size_t written = 0;
+    rc = mbedtls_base64_encode(encoded, sizeof(encoded), &written, mac, sizeof(mac));
+    memset(mac, 0, sizeof(mac));
+    if (rc != 0) {
+        dbg("sign: Base64 failed (" + String(rc) + ")");
+        return String();
+    }
+    return String((const char*)encoded);
 }
 
 void HydroNode::dbg(const String& msg) {

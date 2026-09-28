@@ -17,10 +17,10 @@
 </p>
 
 <p align="center">
-  <a href="https://hydronode.texhfexlabs.de/"><strong>Website</strong></a> ·
-  <a href="https://hydronode.texhfexlabs.de/docs/guide/arduino/">Arduino Guide</a> ·
-  <a href="https://hydronode.texhfexlabs.de/docs/guide/sensor-types/">Sensor Types</a> ·
-  <a href="https://hydronode.texhfexlabs.de/docs/faq/">FAQ</a> ·
+  <a href="https://hydronode.tech/"><strong>Website</strong></a> ·
+  <a href="https://hydronode.tech/docs/guide/arduino/">Arduino Guide</a> ·
+  <a href="https://hydronode.tech/docs/guide/sensor-types/">Sensor Types</a> ·
+  <a href="https://hydronode.tech/docs/faq/">FAQ</a> ·
   <a href="https://github.com/TexhFexLabs/hydronode-homeassistant">Home Assistant Integration</a>
 </p>
 
@@ -32,13 +32,13 @@ hydro.connectWiFi("ssid", "password");
 hydro.sendValue("TEMPERATURE", 21.5);
 ```
 
-[HydroNode](https://hydronode.texhfexlabs.de/) is a secure IoT platform by TexhFexLabs for hydroponics, weather stations and environmental monitoring: cloud data collection, anomaly detection, AI analysis, automation and remote actuation. To use it you need a sensor ID and secret key from the [HydroNode web app](https://hydronode.texhfexlabs.de/) or the iOS app. Creating sensors is free, no activation code needed.
+[HydroNode](https://hydronode.tech/) is a secure IoT platform by TexhFexLabs for hydroponics, weather stations and environmental monitoring: cloud data collection, anomaly detection, AI analysis, automation and remote actuation. To use it you need a sensor ID and secret key from the [HydroNode web app](https://hydronode.tech/) or the mobile apps. Using HydroNode is free.
 
 ## Features
 
 - **Secure by default** — every request is signed with HMAC-SHA256 and sent over TLS. The root CA bundle ships with the library (valid until 2035+), no certificate handling needed.
 - **Replay protection built in** — the backend only accepts requests within a ±2 minute window; the library syncs time via NTP automatically before every send.
-- **Backend commands with delivery confirmation** — react to commands queued in the HydroNode app with simple typed callbacks. The library automatically acknowledges receipt (signed), so the app shows every command as *Confirmed*.
+- **Typed backend commands** — switch a lamp, run a pump or write a calibration value from the HydroNode app. Each command has a value type (`BOOL`, `INT32`, `UINT32`, `INT64`, `UINT64`, `STRING`) that must match your callback. The app shows every command as *Confirmed* or *Declined* with the reason.
 - **WiFi your way** — use the built-in `connectWiFi()` helper, a WiFiManager captive portal, or your own connection management. The library never touches WiFi unless you ask it to.
 - **Honest error reporting** — `sendValue()` returns the HTTP status code or a descriptive error code, so your firmware can retry intelligently.
 - **Lightweight** — no background tasks, no heap surprises, RAM-friendly.
@@ -57,12 +57,12 @@ Install the library via Arduino IDE → Sketch → Include Library → Add .ZIP 
 
 | Library | Purpose |
 |---|---|
-| [ArduinoJson](https://github.com/bblanchon/ArduinoJson) | Parsing backend responses |
+| [ArduinoJson](https://github.com/bblanchon/ArduinoJson) 7.x | Parsing backend responses |
 | [ArduinoHttpClient](https://github.com/arduino-libraries/ArduinoHttpClient) | HTTP transport |
 | [NTPClient](https://github.com/arduino-libraries/NTPClient) | Time sync (required for signatures) |
-| [base64_arduino](https://github.com/Densaugeo/base64_arduino) (Densaugeo) | Signature encoding |
-| [Crypto](https://github.com/rweather/arduinolibs) (Rhys Weatherley) | SHA-256 |
 | [WiFiManager](https://github.com/tzapu/WiFiManager) (tzapu) | Only for the captive-portal example |
+
+Signing (HMAC-SHA256) and Base64 use mbedTLS, which is part of the ESP32 board package. Nothing extra to install. Up to version 1.2.0 the library needed `Crypto` and `base64_arduino`; you can uninstall them if nothing else uses them.
 
 ## Quick Start
 
@@ -94,7 +94,7 @@ void setup() {
 
 void loop() {
     hydro.sendValue("TEMPERATURE", readMySensor());
-    delay(10000);  // backend enforces min. 9 s between submissions
+    delay(10000);  // the backend accepts one value per type every 10 s
 }
 ```
 
@@ -107,7 +107,7 @@ All examples are complete sketches — open them via *File → Examples → Hydr
 | **QuickStart** | Smallest complete sketch. Built-in WiFi helper, one sensor, done. |
 | **WiFiManagerSetup** | No hardcoded WiFi: captive portal (`HydroNode-Setup-XXXX`) for end-user WiFi configuration. |
 | **ExternalWiFi** | You own the WiFi lifecycle (custom reconnect logic); full error handling for every `sendValue()` result. |
-| **ActuatorControl** | Backend commands drive a pump and a fan via callbacks; alternating sensor types within the rate limit. |
+| **ActuatorControl** | Backend commands drive a pump and a fan via callbacks, with a safety limit for the pump run time. |
 
 ## Choosing a WiFi strategy
 
@@ -120,7 +120,8 @@ The library is deliberately WiFi-agnostic. Pick what fits:
 ## API Reference
 
 ### `HydroNode(sensorId, secretKey, host?, path?)`
-Constructor. `host` defaults to `hydronode.texhfexlabs.de`, `path` to `/api/webhook/sensor-value`.
+Constructor. `host` defaults to `hydronode.tech`, `path` to `/api/webhook/sensor-value`.
+Versions up to 1.2.0 used `hydronode.texhfexlabs.de`. That host stays available, so devices already in the field keep working without a reflash.
 
 ### `void begin()`
 Starts the NTP client. Call once in `setup()` after WiFi is available.
@@ -137,33 +138,69 @@ Sends one signed measurement. Returns the HTTP status code, or a negative error:
 | `ERR_WIFI_DISCONNECTED` (−1) | WiFi down | Reconnect, retry |
 | `ERR_TIME_NOT_SYNCED` (−2) | NTP failed | Check internet/UDP 123; signature would be rejected without valid time |
 | `ERR_CONNECTION_FAILED` (−3) | TLS/TCP/transport error | Retry with backoff |
+| `ERR_INVALID_TYPE` (−4) | `type` is not upper case letters, digits and `_` | Use e.g. `TEMPERATURE`, not `temperature`. Nothing was sent |
+| `ERR_INVALID_VALUE` (−5) | `value` is NaN or infinite | Usually a failed sensor read. Nothing was sent |
+| `400` | Request rejected as malformed | Enable `setDebug(Serial)`; should not happen with valid input |
 | `401` | Bad signature or timestamp | Check sensor ID + secret key |
-| `429` | Rate limited | Min. 9 s between submissions per sensor — slow down |
+| `429` | Rate limited | One value per sensor **and type** every 10 s. Slow down |
+| `503` | Backend temporarily unavailable | Retry after about 10 s; the value was not stored |
 
 `value` is transmitted with exactly 2 decimal places.
 
-Common `type` values: `TEMPERATURE`, `HUMIDITY`, `PRESSURE`, `CO2`, `PM25`, `PM10`, `VOC`, `SOIL_MOISTURE`, `SOIL_TEMPERATURE`, `WATER_TEMPERATURE`, `WATER_PH`, `WATER_EC`, `BATTERY_VOLTAGE` — see the [sensor type reference](https://hydronode.texhfexlabs.de/docs/guide/sensor-types/) for the full list of 30+ types with units and scales.
+`type` must start with an upper case letter and may contain `A`–`Z`, `0`–`9` and `_`, at most 64 characters. The library checks this before sending. Common `type` values: `TEMPERATURE`, `HUMIDITY`, `PRESSURE`, `CO2`, `PM25`, `PM10`, `VOC`, `SOIL_MOISTURE`, `SOIL_TEMPERATURE`, `WATER_TEMPERATURE`, `WATER_PH`, `WATER_EC`, `BATTERY_VOLTAGE` — see the [sensor type reference](https://hydronode.tech/docs/guide/sensor-types/) for the full list of 30+ types with units and scales.
 
-### `void on(key, handler)` — backend command callbacks
-Commands queued for your sensor (via the HydroNode app or API) are delivered in the response of `sendValue()`:
+### Commands: `onBool`, `onInt32`, `onUInt32`, `onInt64`, `onUInt64`, `onString`
 
-```json
-{"commands":[{"id":"6f9c...","command":"pump","value":4000},{"id":"a1b2...","command":"fan","value":true}]}
-```
+In the HydroNode app you send a command to your device with a **name**, a **value type** and a **value**, for example:
 
-Registered handlers are called with the value:
+| Name | Type | Value | Use |
+|---|---|---|---|
+| `lamp` | `BOOL` | `true` / `false` | Switch a relay |
+| `pump` | `UINT32` | `4000` | Run a pump for 4000 ms |
+| `co2_calibration` | `UINT32` | `0x20124` | Write a calibration register (hex is fine) |
+| `offset` | `INT32` | `-15` | Signed setting, e.g. tenths of a degree |
+| `display` | `STRING` | `Hello` | Show text |
+
+On the device you register one callback per name with the same type:
 
 ```cpp
-void pumpCallback(int ms)  { /* run pump for ms */ }
-void fanCallback(bool on)  { /* switch fan */ }
-
-hydro.on("pump", HydroNode::bindCallback<int>(pumpCallback));
-hydro.on("fan",  HydroNode::bindCallback<bool>(fanCallback));
+hydro.onBool("lamp", [](bool on) { digitalWrite(LAMP_PIN, on); });
+hydro.onUInt32("pump", [](uint32_t ms) { runPump(ms > 10000 ? 10000 : ms); });
+hydro.onUInt32("co2_calibration", [](uint32_t value) { co2.setCalibration(value); });
+hydro.onInt32("offset", [](int32_t tenths) { offset = tenths / 10.0; });
+hydro.onString("display", [](const String& text) { lcd.print(text); });
 ```
 
-`bindCallback<T>` supports any JSON-convertible type: `int`, `bool`, `float`, `String`, …
+| Type | Callback | Range |
+|---|---|---|
+| `BOOL` | `onBool(name, void(bool))` | `true`, `false` |
+| `INT32` | `onInt32(name, void(int32_t))` | −2147483648 to 2147483647 |
+| `UINT32` | `onUInt32(name, void(uint32_t))` | 0 to 4294967295 |
+| `INT64` | `onInt64(name, void(int64_t))` | full signed 64-bit range |
+| `UINT64` | `onUInt64(name, void(uint64_t))` | full unsigned 64-bit range |
+| `STRING` | `onString(name, void(const String&))` | text up to about 500 characters |
 
-**Delivery confirmation:** before dispatching, the library sends a signed acknowledgment to the backend (`/api/webhook/sensor-command-ack`). Commands then show up as *Confirmed* in the HydroNode app. This happens automatically — nothing to configure.
+There is no float type on purpose: send a whole number in a fixed unit (tenths, milliseconds, ...) so the app and the device agree on the exact value.
+
+**What the app shows.** Before any callback runs, the library answers the backend with a signed request:
+
+| Status in the app | Meaning |
+|---|---|
+| *Confirmed* | A callback with the matching type exists and runs now |
+| *Declined: no handler* | No callback is registered for this name. Check the spelling |
+| *Declined: type mismatch* | A callback exists, but for a different type than the one picked in the app |
+| *Declined: invalid value* | The value does not fit the type, e.g. `-1` for `UINT32` |
+
+A declined command is never run. Commands without a type (sent by older app versions) run when the value fits the callback's type.
+
+**Timing and safety.**
+
+- Commands arrive with the next `sendValue()`. If your device sends every 5 minutes, a command may take up to 5 minutes to arrive. Unpicked commands expire after 24 hours.
+- Every command is delivered at most once. If the response is lost on the way, the command is not repeated; send it again from the app.
+- Values come over the network. Clamp them to what your hardware can safely do, as the `ActuatorControl` example does for the pump.
+- Callbacks run one after another inside `sendValue()`. Long blocking work (like `delay()` in a pump callback) delays your next measurement.
+
+**Untyped callbacks.** `on(name, void(JsonVariant))` receives any value without a type check, for commands that accept several types. Sketches written for version 1.2.0 and older (`hydro.on("pump", HydroNode::bindCallback<int>(pumpCallback))`) keep compiling and working.
 
 ### Tuning
 
@@ -171,7 +208,7 @@ hydro.on("fan",  HydroNode::bindCallback<bool>(fanCallback));
 |---|---|---|
 | `setDebug(Serial)` | off | Log WiFi/NTP/HTTP activity to any `Stream` |
 | `setHttpTimeout(ms)` | 10000 | HTTP response timeout |
-| `setJsonBufferSize(bytes)` | 1024 | Response parse buffer; enough for ~8 commands per delivery |
+| `setJsonBufferSize(bytes)` | 8192 | Largest response the library parses. Fits the backend maximum of 8 commands per delivery |
 | `getApName()` | — | `"HydroNode-Setup-XXXX"` (last 4 chars of sensor ID), for WiFiManager |
 
 ## Security model
@@ -180,7 +217,8 @@ hydro.on("fan",  HydroNode::bindCallback<bool>(fanCallback));
 - **Command delivery**: the backend hands out queued commands only in responses to correctly signed value submissions — an attacker who knows your sensor ID cannot fetch them.
 - **Replay protection**: `X-Timestamp` must be within ±2 minutes of server time. The library syncs via NTP before each send and refuses to transmit with an unsynced clock (`ERR_TIME_NOT_SYNCED`) instead of sending a doomed request.
 - **Transport**: TLS 1.2+ against a bundled root CA set (Google Trust Services, ISRG/Let's Encrypt, SSL.com — the roots Cloudflare Universal SSL chains to). All bundled roots are valid until at least 2035, so certificate rotation on the server side never requires a reflash.
-- **Rate limiting**: the backend accepts max. one submission per sensor per 9 seconds.
+- **Rate limiting**: the backend accepts one value per sensor and type every 10 seconds. Different types may be sent right after each other.
+- **Actuators**: command values come over the network. Clamp them in your handler to what your hardware can safely do (see the `ActuatorControl` example).
 
 ## Troubleshooting
 
@@ -188,23 +226,27 @@ hydro.on("fan",  HydroNode::bindCallback<bool>(fanCallback));
 |---|---|
 | `ERR_TIME_NOT_SYNCED` | No internet access or UDP port 123 blocked — NTP can't sync |
 | `401` | Wrong secret key/sensor ID, or device clock drifted outside the ±2 min window |
-| `429` | Sending faster than every 9 s (also applies when alternating types) |
+| `429` | Sending the same type more often than every 10 s |
+| `ERR_INVALID_TYPE` | Lower case or special characters in `type`, e.g. `"temperature"` or `"PM2.5"` |
+| `ERR_INVALID_VALUE` | Sensor read failed and returned NaN, e.g. a DHT22 without pull-up |
 | `ERR_CONNECTION_FAILED` | DNS/TLS/network issue — enable `setDebug(Serial)` and check the log |
 | Compile error on ESP8266 | Not supported — the library requires an ESP32 |
 
 ## Obtaining Sensor Credentials
 
-All access to the HydroNode network requires a sensor ID and secret key. **Sensor registration is currently free of charge** — create a sensor with just a name in the [HydroNode web app](https://hydronode.texhfexlabs.de/) or the iOS app and you'll receive its UUID and secret immediately. No activation code purchase needed.
+Every device needs a sensor ID and a secret key. Create a sensor with just a name in the [HydroNode web app](https://hydronode.tech/), the iOS app or the Android app, and you receive its ID and secret immediately.
 
-The activation-code system still exists for backward compatibility; previously purchased codes remain redeemable, but new sensors are created directly and at no cost. If running costs grow, a small fee may be introduced later.
+Using HydroNode is free. Each account can have up to 20 sensors.
+
+Treat the secret key like a password. If you publish your sketch, move the credentials into a separate `secrets.h` and keep that file out of version control.
 
 For development or trial setups, contact **contact@knollfelix.de**.
 
 ## Related
 
-- [HydroNode website & docs](https://hydronode.texhfexlabs.de/) — dashboard, guides, FAQ
-- [Getting started with Arduino/ESP32](https://hydronode.texhfexlabs.de/docs/guide/arduino/) — step-by-step guide for this library
-- [LoRaWAN integration](https://hydronode.texhfexlabs.de/docs/guide/lorawan/) — battery-powered sensors without WiFi
+- [HydroNode website & docs](https://hydronode.tech/) — dashboard, guides, FAQ
+- [Getting started with Arduino/ESP32](https://hydronode.tech/docs/guide/arduino/) — step-by-step guide for this library
+- [LoRaWAN integration](https://hydronode.tech/docs/guide/lorawan/) — battery-powered sensors without WiFi
 - [Home Assistant integration](https://github.com/TexhFexLabs/hydronode-homeassistant) — your HydroNode sensors as native HA entities (HACS)
 
 ## License

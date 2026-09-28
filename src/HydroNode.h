@@ -32,7 +32,7 @@
  *
  *   void loop() {
  *       hydro.sendValue("TEMPERATURE", 21.5);
- *       delay(10000);   // backend enforces min. 9 s between submissions
+ *       delay(10000);   // backend accepts one value per type every 10 s
  *   }
  */
 class HydroNode {
@@ -41,11 +41,13 @@ public:
     static constexpr int ERR_WIFI_DISCONNECTED = -1;  // WiFi not connected
     static constexpr int ERR_TIME_NOT_SYNCED   = -2;  // NTP sync failed (signature would be rejected)
     static constexpr int ERR_CONNECTION_FAILED = -3;  // TLS/TCP connection or HTTP transport error
+    static constexpr int ERR_INVALID_TYPE      = -4;  // type is not A-Z, 0-9, _ starting with a letter
+    static constexpr int ERR_INVALID_VALUE     = -5;  // value is NaN or infinite
 
     HydroNode(
         const char* sensorId,
         const char* secretKey,
-        const char* host = "hydronode.texhfexlabs.de",
+        const char* host = "hydronode.tech",
         const char* path = "/api/webhook/sensor-value"
     );
 
@@ -67,30 +69,52 @@ public:
     /**
      * Send one measurement to the backend.
      *
-     * @param type  Sensor type, e.g. "TEMPERATURE", "HUMIDITY", "SOIL_MOISTURE".
+     * @param type  Sensor type in upper case, e.g. "TEMPERATURE", "HUMIDITY",
+     *              "SOIL_MOISTURE". Allowed: A-Z, 0-9 and _, starting with a
+     *              letter, at most 64 characters.
      * @param value Measured value (transmitted with 2 decimal places).
      * @return HTTP status code (202 = accepted) or a negative ERR_* code.
      *
-     * Note: the backend rate-limits to one submission per sensor per 9 seconds.
-     * Space out consecutive calls by at least 10 seconds.
+     * Note: the backend accepts one value per sensor and type every 10 seconds.
+     * Different types may be sent right after each other.
      */
     int sendValue(const char* type, float value);
 
     /**
-     * Register a callback for a backend command key, e.g.
-     * hydro.on("pump", HydroNode::bindCallback<int>(pumpCallback));
+     * Command callbacks. Register one per command name with the value type
+     * you expect; the type must match what you pick in the HydroNode app.
      *
-     * Commands are delivered in the response of sendValue() as
-     * {"commands":[{"id":"...","command":"pump","value":4000}]}.
-     * The library acknowledges receipt to the backend (signed) before
-     * dispatching, so the HydroNode app shows commands as confirmed.
+     *   hydro.onBool("lamp", [](bool on) { digitalWrite(LAMP_PIN, on); });
+     *   hydro.onUInt32("co2_calibration", [](uint32_t v) { sensor.calibrate(v); });
+     *
+     * Commands arrive in the response of sendValue(). Before any callback
+     * runs, the library answers the backend (signed): commands with a
+     * matching callback are confirmed, all others are declined with a reason
+     * (NO_HANDLER, TYPE_MISMATCH, INVALID_VALUE) that the app shows.
+     */
+    void onBool(const String& key, std::function<void(bool)> handler);
+    void onInt32(const String& key, std::function<void(int32_t)> handler);
+    void onUInt32(const String& key, std::function<void(uint32_t)> handler);
+    void onInt64(const String& key, std::function<void(int64_t)> handler);
+    void onUInt64(const String& key, std::function<void(uint64_t)> handler);
+    void onString(const String& key, std::function<void(const String&)> handler);
+
+    /**
+     * Untyped callback that receives the raw JSON value of any type, e.g. for
+     * commands that accept several types. Also keeps sketches written for
+     * library versions up to 1.2.0 working:
+     *   hydro.on("pump", HydroNode::bindCallback<int>(pumpCallback));
      */
     void on(const String& key, std::function<void(JsonVariant)> handler);
 
     /** Captive-portal AP name for WiFiManager: "HydroNode-Setup-<last 4 of sensor id>". */
     String getApName() const;
 
-    /** Buffer size for parsing backend responses (default 1024 bytes). */
+    /**
+     * Largest backend response in bytes the library will parse (default 8192).
+     * Larger responses are ignored. The default fits the backend maximum of
+     * 8 commands per delivery, so there is normally no need to change it.
+     */
     void setJsonBufferSize(size_t size);
 
     /** HTTP response timeout in milliseconds (default 10000). */
@@ -99,7 +123,11 @@ public:
     /** Enable debug logging, e.g. hydro.setDebug(Serial). */
     void setDebug(Stream& stream);
 
-    /** Wraps a plain function into a JsonVariant handler with automatic type conversion. */
+    /**
+     * Wraps a plain function into an untyped handler with ArduinoJson's lenient
+     * conversion. Kept for sketches from version 1.2.0 and older; new code
+     * should use the typed onBool(), onUInt32(), ... which reject wrong types.
+     */
     template<typename T>
     static std::function<void(JsonVariant)> bindCallback(void (*fn)(T)) {
         return [fn](JsonVariant v) { fn(v.as<T>()); };
@@ -111,22 +139,29 @@ private:
     const char* host_;
     const char* path_;
     const char* ackPath_ = "/api/webhook/sensor-command-ack";
-    size_t jsonBufferSize_ = 1024;
+    size_t jsonBufferSize_ = 8192;
     uint32_t httpTimeoutMs_ = 10000;
     int httpsPort_ = 443;
     Stream* debug_ = nullptr;
 
-    std::map<String, std::function<void(JsonVariant)>> handlers_;
+    enum class ValueType : uint8_t { ANY, BOOL, INT32, UINT32, INT64, UINT64, STRING };
+
+    struct Handler {
+        ValueType type;
+        std::function<void(JsonVariant)> fn;
+    };
+
+    std::map<String, Handler> handlers_;
 
     WiFiUDP ntpUDP_;
     NTPClient timeClient_;
 
     bool ensureTimeSynced(unsigned long& epochOut);
-    void hmac_sha256(const uint8_t* key, size_t keylen, const uint8_t* data, size_t datalen, uint8_t* out);
-    String toBase64(const uint8_t* input, size_t len);
+    static bool isValidType(const char* type);
     String sign(const String& message);
     int postSigned(const char* path, const String& payload, unsigned long epoch, String& responseOut);
     void handleResponse(const String& response);
-    bool sendAck(const String& commandIdsJson);
+    static const char* checkCommand(const Handler& handler, const char* wireType, JsonVariant value);
+    bool sendAck(JsonArrayConst accepted, JsonArrayConst declined);
     void dbg(const String& msg);
 };

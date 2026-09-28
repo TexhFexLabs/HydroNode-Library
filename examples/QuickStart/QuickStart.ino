@@ -39,6 +39,6 @@ void loop() {
     if (status != 202) {
         Serial.printf("Send failed (code %d)\n", status);
     }
-    // Backend enforces min. 9 s between submissions per sensor.
+    // The backend accepts one value per type every 10 seconds.
     delay(10000);
 }
