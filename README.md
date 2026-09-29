@@ -240,7 +240,7 @@ Using HydroNode is free. Each account can have up to 20 sensors.
 
 Treat the secret key like a password. If you publish your sketch, move the credentials into a separate `secrets.h` and keep that file out of version control.
 
-For development or trial setups, contact **contact@knollfelix.de**.
+For development or trial setups, contact **support@hydronode.tech**.
 
 ## Related
 
@@ -254,4 +254,4 @@ For development or trial setups, contact **contact@knollfelix.de**.
 MIT — see [LICENSE](LICENSE).
 
 HydroNode-Library is developed and maintained by **TexhFexLabs**.
-Support, feature requests, business inquiries: contact@knollfelix.de
+Support, feature requests, business inquiries: support@hydronode.tech
