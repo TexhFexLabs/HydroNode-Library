@@ -1,15 +1,20 @@
 #pragma once
 
-#if !defined(ESP32)
-#error "HydroNode-Library requires an ESP32 board (it uses WiFiClientSecure::setCACert for TLS)."
+#if !defined(ESP32) && !defined(ESP8266)
+#error "HydroNode-Library requires an ESP32 or ESP8266 board (it needs TLS with certificate validation)."
 #endif
 
 #include <Arduino.h>
 #include <map>
 #include <functional>
 #include <ArduinoJson.h>
+#if defined(ESP8266)
+#include <ESP8266WiFi.h>
+#include <WiFiClientSecureBearSSL.h>
+#else
 #include <WiFi.h>
 #include <WiFiClientSecure.h>
+#endif
 #include <ArduinoHttpClient.h>
 #include <NTPClient.h>
 #include <WiFiUdp.h>

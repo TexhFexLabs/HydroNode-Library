@@ -4,8 +4,13 @@
 #include <vector>
 #include <time.h>
 #include <sys/time.h>
+#if defined(ESP8266)
+#include <base64.h>
+#include <bearssl/bearssl_hmac.h>
+#else
 #include <mbedtls/md.h>
 #include <mbedtls/base64.h>
+#endif
 
 // Epoch sanity floor: any synced clock is past 2020-09-13. Values below
 // mean the NTP sync never happened and the system clock is still at 1970.
@@ -101,7 +106,7 @@ bool HydroNode::ensureTimeSynced(unsigned long& epochOut) {
         return false;
     }
 
-    // mbedTLS validates certificate notBefore/notAfter against the system
+    // The TLS stack validates certificate notBefore/notAfter against the system
     // clock, which starts at 1970 after boot (NTPClient does not set it).
     // Sync it once from NTP so TLS certificate validation can succeed.
     if (time(nullptr) < (time_t)MIN_VALID_EPOCH) {
@@ -284,8 +289,16 @@ int HydroNode::postSigned(const char* path, const String& payload, unsigned long
         return ERR_CONNECTION_FAILED;
     }
 
+#if defined(ESP8266)
+    // BearSSL: parse the root bundle once, it stays valid for the lifetime of the sketch.
+    static BearSSL::X509List trust(HYDRONODE_CA_BUNDLE);
+    BearSSL::WiFiClientSecure client;
+    client.setTrustAnchors(&trust);
+    client.setX509Time(epoch);
+#else
     WiFiClientSecure client;
     client.setCACert(HYDRONODE_CA_BUNDLE);
+#endif
 
     HttpClient http(client, host_, httpsPort_);
     http.setHttpResponseTimeout(httpTimeoutMs_);
@@ -317,9 +330,21 @@ bool HydroNode::isValidType(const char* type) {
     return true;
 }
 
-/** Base64(HMAC-SHA256(secretKey, message)), computed with the mbedTLS built into the ESP32 core. */
+/** Base64(HMAC-SHA256(secretKey, message)), computed with the TLS library built into the core. */
 String HydroNode::sign(const String& message) {
     uint8_t mac[32];
+#if defined(ESP8266)
+    br_hmac_key_context key;
+    br_hmac_context ctx;
+    br_hmac_key_init(&key, &br_sha256_vtable, secretKey_, strlen(secretKey_));
+    br_hmac_init(&ctx, &key, 0);
+    br_hmac_update(&ctx, message.c_str(), message.length());
+    br_hmac_out(&ctx, mac);
+    String encoded = base64::encode(mac, sizeof(mac), false);
+    memset(mac, 0, sizeof(mac));
+    memset(&key, 0, sizeof(key));
+    return encoded;
+#else
     const mbedtls_md_info_t* sha256 = mbedtls_md_info_from_type(MBEDTLS_MD_SHA256);
     int rc = mbedtls_md_hmac(
         sha256,
@@ -341,6 +366,7 @@ String HydroNode::sign(const String& message) {
         return String();
     }
     return String((const char*)encoded);
+#endif
 }
 
 void HydroNode::dbg(const String& msg) {

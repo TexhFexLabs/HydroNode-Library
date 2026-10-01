@@ -8,7 +8,8 @@
 // serves both ECDSA and RSA chains. Pinning a single root therefore
 // breaks randomly. This bundle contains all roots those CAs chain to,
 // each valid until 2035-2041 -> no reflash needed for years.
-// mbedTLS (ESP32 WiFiClientSecure::setCACert) accepts concatenated PEMs.
+// mbedTLS (ESP32 WiFiClientSecure::setCACert) and BearSSL (ESP8266 X509List)
+// both accept concatenated PEMs.
 static const char HYDRONODE_CA_BUNDLE[] PROGMEM = R"EOF(
 -----BEGIN CERTIFICATE-----
 MIIFVzCCAz+gAwIBAgINAgPlk28xsBNJiGuiFzANBgkqhkiG9w0BAQwFADBHMQsw

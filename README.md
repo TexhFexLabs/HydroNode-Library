@@ -5,14 +5,14 @@
 <h1 align="center">HydroNode-Library</h1>
 
 <p align="center">
-  Arduino/ESP32 client for the <strong>HydroNode</strong> IoT backend by TexhFexLabs.<br>
+  Arduino client (ESP32, ESP8266) for the <strong>HydroNode</strong> IoT backend by TexhFexLabs.<br>
   Signed sensor uploads, TLS out of the box, backend command callbacks — in three lines of code.
 </p>
 
 <p align="center">
   <a href="https://www.ardu-badge.com/HydroNode-Library"><img src="https://www.ardu-badge.com/badge/HydroNode-Library.svg" alt="Arduino Library Manager"></a>
   <a href="https://github.com/TexhFexLabs/HydroNode-Library/releases/latest"><img src="https://img.shields.io/github/v/release/TexhFexLabs/HydroNode-Library?label=release&color=2ea44f" alt="Latest release"></a>
-  <img src="https://img.shields.io/badge/platform-ESP32-e7352c.svg" alt="ESP32">
+  <img src="https://img.shields.io/badge/platform-ESP32%20%7C%20ESP8266-e7352c.svg" alt="ESP32 | ESP8266">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="MIT license"></a>
 </p>
 
@@ -43,7 +43,7 @@ hydro.sendValue("TEMPERATURE", 21.5);
 - **Honest error reporting** — `sendValue()` returns the HTTP status code or a descriptive error code, so your firmware can retry intelligently.
 - **Lightweight** — no background tasks, no heap surprises, RAM-friendly.
 
-**Board support: ESP32 (all variants).** The library uses the ESP32 TLS API (`WiFiClientSecure::setCACert`); ESP8266 is not supported.
+**Board support: ESP32 (all variants) and ESP8266 (4 MB flash recommended).** TLS uses `WiFiClientSecure` with the bundled root certificates: mbedTLS on ESP32, BearSSL on ESP8266. The ESP8266 has little RAM for TLS; keep the rest of the sketch lean.
 
 ## Installation
 
@@ -62,7 +62,7 @@ Install the library via Arduino IDE → Sketch → Include Library → Add .ZIP 
 | [NTPClient](https://github.com/arduino-libraries/NTPClient) | Time sync (required for signatures) |
 | [WiFiManager](https://github.com/tzapu/WiFiManager) (tzapu) | Only for the captive-portal example |
 
-Signing (HMAC-SHA256) and Base64 use mbedTLS, which is part of the ESP32 board package. Nothing extra to install. Up to version 1.2.0 the library needed `Crypto` and `base64_arduino`; you can uninstall them if nothing else uses them.
+Signing (HMAC-SHA256) and Base64 use the TLS library that ships with the board package: mbedTLS on ESP32, BearSSL on ESP8266. Nothing extra to install. Up to version 1.2.0 the library needed `Crypto` and `base64_arduino`; you can uninstall them if nothing else uses them.
 
 ## Quick Start
 
@@ -230,7 +230,6 @@ A declined command is never run. Commands without a type (sent by older app vers
 | `ERR_INVALID_TYPE` | Lower case or special characters in `type`, e.g. `"temperature"` or `"PM2.5"` |
 | `ERR_INVALID_VALUE` | Sensor read failed and returned NaN, e.g. a DHT22 without pull-up |
 | `ERR_CONNECTION_FAILED` | DNS/TLS/network issue — enable `setDebug(Serial)` and check the log |
-| Compile error on ESP8266 | Not supported — the library requires an ESP32 |
 
 ## Obtaining Sensor Credentials
 
