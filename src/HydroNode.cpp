@@ -95,11 +95,16 @@ bool HydroNode::ensureTimeSynced(unsigned long& epochOut) {
     // The backend rejects timestamps outside a small replay window
     // (currently +/- 2 minutes), so an unsynced or stale clock means a
     // guaranteed 401. Retry the NTP sync a few times before giving up.
+    // One unanswered UDP packet must not cost the reading: try the next server instead of the
+    // same one again. Back to the pool afterwards for regular updates.
+    static const char* const servers[] = {"pool.ntp.org", "time.google.com", "time.cloudflare.com"};
     timeClient_.update();
     for (int attempt = 0; attempt < 3 && timeClient_.getEpochTime() < MIN_VALID_EPOCH; attempt++) {
-        dbg("NTP: forcing update (attempt " + String(attempt + 1) + ")");
+        timeClient_.setPoolServerName(servers[attempt]);
+        dbg("NTP: forcing update via " + String(servers[attempt]));
         timeClient_.forceUpdate();
     }
+    timeClient_.setPoolServerName(servers[0]);
 
     unsigned long epoch = timeClient_.getEpochTime();
     if (epoch < MIN_VALID_EPOCH) {
@@ -290,8 +295,9 @@ int HydroNode::postSigned(const char* path, const String& payload, unsigned long
     }
 
 #if defined(ESP8266)
-    // BearSSL: parse the root bundle once, it stays valid for the lifetime of the sketch.
-    static BearSSL::X509List trust(HYDRONODE_CA_BUNDLE);
+    // BearSSL: parse the roots once, they stay valid for the lifetime of the sketch. ECDSA roots
+    // only: the RSA-4096 ones would take ~6 KB of a heap the handshake needs in full.
+    static BearSSL::X509List trust(HYDRONODE_CA_BUNDLE_EC);
     BearSSL::WiFiClientSecure client;
     client.setTrustAnchors(&trust);
     client.setX509Time(epoch);
