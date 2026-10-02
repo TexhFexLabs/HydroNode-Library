@@ -149,6 +149,14 @@ Sends one signed measurement. Returns the HTTP status code, or a negative error:
 
 `type` must start with an upper case letter and may contain `A`–`Z`, `0`–`9` and `_`, at most 64 characters. The library checks this before sending. Common `type` values: `TEMPERATURE`, `HUMIDITY`, `PRESSURE`, `CO2`, `PM25`, `PM10`, `VOC`, `SOIL_MOISTURE`, `SOIL_TEMPERATURE`, `WATER_TEMPERATURE`, `WATER_PH`, `WATER_EC`, `BATTERY_VOLTAGE` — see the [sensor type reference](https://hydronode.tech/docs/guide/sensor-types/) for the full list of 30+ types with units and scales.
 
+### `void closeConnection()`
+
+Values sent in a row share one TLS connection (HTTP keep-alive): the handshake takes seconds on an ESP8266, every further value a fraction of that. Close the connection after the last value of a round, before the board sleeps or waits for a long time. The next `sendValue()` connects again.
+
+### `bool syncTime()` and `uint64_t epochMs()`
+
+`sendValue()` keeps the time in sync on its own. In ESP8266 light sleep the clock stands still, so call `syncTime()` after waking up and before sending. `epochMs()` returns the time of the last sync plus `millis()` since then (0 before the first sync), handy to start readings on a fixed schedule.
+
 ### Commands: `onBool`, `onInt32`, `onUInt32`, `onInt64`, `onUInt64`, `onString`
 
 In the HydroNode app you send a command to your device with a **name**, a **value type** and a **value**, for example:
@@ -161,7 +169,7 @@ In the HydroNode app you send a command to your device with a **name**, a **valu
 | `offset` | `INT32` | `-15` | Signed setting, e.g. tenths of a degree |
 | `display` | `STRING` | `Hello` | Show text |
 
-On the device you register one callback per name with the same type:
+On the device you register one callback per name and type:
 
 ```cpp
 hydro.onBool("lamp", [](bool on) { digitalWrite(LAMP_PIN, on); });
@@ -180,6 +188,15 @@ hydro.onString("display", [](const String& text) { lcd.print(text); });
 | `UINT64` | `onUInt64(name, void(uint64_t))` | full unsigned 64-bit range |
 | `STRING` | `onString(name, void(const String&))` | text up to about 500 characters |
 
+**One name, several types.** Since 1.5.0 a name can have one callback per type. A relay can then be switched with `relay1 true` and pulsed with `relay1 1400`:
+
+```cpp
+hydro.onBool("relay1", [](bool on) { digitalWrite(RELAY_PIN, on); });
+hydro.onUInt32("relay1", [](uint32_t ms) { pulseFor(RELAY_PIN, ms); });
+```
+
+A typed command runs the callback of its type. A command without a type (older app versions) runs the first callback whose type fits the value.
+
 There is no float type on purpose: send a whole number in a fixed unit (tenths, milliseconds, ...) so the app and the device agree on the exact value.
 
 **What the app shows.** Before any callback runs, the library answers the backend with a signed request:
@@ -188,7 +205,7 @@ There is no float type on purpose: send a whole number in a fixed unit (tenths, 
 |---|---|
 | *Confirmed* | A callback with the matching type exists and runs now |
 | *Declined: no handler* | No callback is registered for this name. Check the spelling |
-| *Declined: type mismatch* | A callback exists, but for a different type than the one picked in the app |
+| *Declined: type mismatch* | Callbacks exist for this name, but none for the type picked in the app |
 | *Declined: invalid value* | The value does not fit the type, e.g. `-1` for `UINT32` |
 
 A declined command is never run. Commands without a type (sent by older app versions) run when the value fits the callback's type.

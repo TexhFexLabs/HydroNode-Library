@@ -18,8 +18,12 @@ static constexpr unsigned long MIN_VALID_EPOCH = 1600000000UL;
 
 HydroNode::HydroNode(const char* sensorId, const char* secretKey, const char* host, const char* path)
     : sensorId_(sensorId), secretKey_(secretKey), host_(host), path_(path),
-      timeClient_(ntpUDP_, "pool.ntp.org")
+      http_(tls_, host, 443), timeClient_(ntpUDP_, "pool.ntp.org")
 {
+}
+
+void HydroNode::closeConnection() {
+    http_.stop();
 }
 
 void HydroNode::begin() {
@@ -49,34 +53,47 @@ String HydroNode::getApName() const {
     return "HydroNode-Setup-" + suffix;
 }
 
+// One name can carry several types ("relay" as BOOL to switch, as UINT32 to pulse). Registering
+// the same name and type again replaces that callback only.
+void HydroNode::addHandler(const String& key, ValueType type, std::function<void(JsonVariant)> fn) {
+    std::vector<Handler>& list = handlers_[key];
+    for (Handler& h : list) {
+        if (h.type == type) {
+            h.fn = fn;
+            return;
+        }
+    }
+    list.push_back(Handler{type, fn});
+}
+
 void HydroNode::on(const String& key, std::function<void(JsonVariant)> handler) {
-    handlers_[key] = Handler{ValueType::ANY, handler};
+    addHandler(key, ValueType::ANY, handler);
 }
 
 // Typed callbacks only run after checkCommand() has confirmed that the value
 // fits the type, so the as<T>() conversions below never truncate or guess.
 void HydroNode::onBool(const String& key, std::function<void(bool)> handler) {
-    handlers_[key] = Handler{ValueType::BOOL, [handler](JsonVariant v) { handler(v.as<bool>()); }};
+    addHandler(key, ValueType::BOOL, [handler](JsonVariant v) { handler(v.as<bool>()); });
 }
 
 void HydroNode::onInt32(const String& key, std::function<void(int32_t)> handler) {
-    handlers_[key] = Handler{ValueType::INT32, [handler](JsonVariant v) { handler(v.as<int32_t>()); }};
+    addHandler(key, ValueType::INT32, [handler](JsonVariant v) { handler(v.as<int32_t>()); });
 }
 
 void HydroNode::onUInt32(const String& key, std::function<void(uint32_t)> handler) {
-    handlers_[key] = Handler{ValueType::UINT32, [handler](JsonVariant v) { handler(v.as<uint32_t>()); }};
+    addHandler(key, ValueType::UINT32, [handler](JsonVariant v) { handler(v.as<uint32_t>()); });
 }
 
 void HydroNode::onInt64(const String& key, std::function<void(int64_t)> handler) {
-    handlers_[key] = Handler{ValueType::INT64, [handler](JsonVariant v) { handler(v.as<int64_t>()); }};
+    addHandler(key, ValueType::INT64, [handler](JsonVariant v) { handler(v.as<int64_t>()); });
 }
 
 void HydroNode::onUInt64(const String& key, std::function<void(uint64_t)> handler) {
-    handlers_[key] = Handler{ValueType::UINT64, [handler](JsonVariant v) { handler(v.as<uint64_t>()); }};
+    addHandler(key, ValueType::UINT64, [handler](JsonVariant v) { handler(v.as<uint64_t>()); });
 }
 
 void HydroNode::onString(const String& key, std::function<void(const String&)> handler) {
-    handlers_[key] = Handler{ValueType::STRING, [handler](JsonVariant v) { handler(String(v.as<const char*>())); }};
+    addHandler(key, ValueType::STRING, [handler](JsonVariant v) { handler(String(v.as<const char*>())); });
 }
 
 void HydroNode::setJsonBufferSize(size_t size) {
@@ -91,20 +108,42 @@ void HydroNode::setDebug(Stream& stream) {
     debug_ = &stream;
 }
 
+bool HydroNode::forceSync() {
+    // One unanswered UDP packet must not cost the reading: try the next server instead of the
+    // same one again. Back to the pool afterwards for regular updates.
+    static const char* const servers[] = {"pool.ntp.org", "time.google.com", "time.cloudflare.com"};
+    bool ok = false;
+    for (int attempt = 0; attempt < 3 && !ok; attempt++) {
+        timeClient_.setPoolServerName(servers[attempt]);
+        dbg("NTP: forcing update via " + String(servers[attempt]));
+        ok = timeClient_.forceUpdate() && timeClient_.getEpochTime() >= MIN_VALID_EPOCH;
+    }
+    timeClient_.setPoolServerName(servers[0]);
+    if (ok) noteSync();
+    return ok;
+}
+
+void HydroNode::noteSync() {
+    syncedEpoch_ = timeClient_.getEpochTime();
+    syncedAtMs_ = millis();
+}
+
+bool HydroNode::syncTime() {
+    if (WiFi.status() != WL_CONNECTED) return false;
+    return forceSync();
+}
+
+uint64_t HydroNode::epochMs() const {
+    if (syncedEpoch_ == 0) return 0;
+    return uint64_t(syncedEpoch_) * 1000ULL + (millis() - syncedAtMs_);
+}
+
 bool HydroNode::ensureTimeSynced(unsigned long& epochOut) {
     // The backend rejects timestamps outside a small replay window
     // (currently +/- 2 minutes), so an unsynced or stale clock means a
     // guaranteed 401. Retry the NTP sync a few times before giving up.
-    // One unanswered UDP packet must not cost the reading: try the next server instead of the
-    // same one again. Back to the pool afterwards for regular updates.
-    static const char* const servers[] = {"pool.ntp.org", "time.google.com", "time.cloudflare.com"};
-    timeClient_.update();
-    for (int attempt = 0; attempt < 3 && timeClient_.getEpochTime() < MIN_VALID_EPOCH; attempt++) {
-        timeClient_.setPoolServerName(servers[attempt]);
-        dbg("NTP: forcing update via " + String(servers[attempt]));
-        timeClient_.forceUpdate();
-    }
-    timeClient_.setPoolServerName(servers[0]);
+    if (timeClient_.update()) noteSync();
+    if (timeClient_.getEpochTime() < MIN_VALID_EPOCH) forceSync();
 
     unsigned long epoch = timeClient_.getEpochTime();
     if (epoch < MIN_VALID_EPOCH) {
@@ -203,13 +242,8 @@ void HydroNode::handleResponse(const String& response) {
         const char* key = cmd["command"];
         if (!id || !key) continue;
 
-        const char* reason = nullptr;
-        auto it = handlers_.find(String(key));
-        if (it == handlers_.end()) {
-            reason = "NO_HANDLER";
-        } else {
-            reason = checkCommand(it->second, cmd["type"], cmd["value"]);
-        }
+        const Handler* handler = nullptr;
+        const char* reason = pickHandler(String(key), cmd["type"], cmd["value"], handler);
 
         if (reason) {
             dbg("command '" + String(key) + "' declined: " + reason);
@@ -218,7 +252,7 @@ void HydroNode::handleResponse(const String& response) {
             entry["reason"] = reason;
         } else {
             accepted.add(id);
-            toRun.emplace_back(cmd, &it->second);
+            toRun.emplace_back(cmd, handler);
         }
     }
 
@@ -233,17 +267,59 @@ void HydroNode::handleResponse(const String& response) {
 }
 
 /**
+ * Finds the callback for a command. A typed command goes to the callback of that
+ * type, or to an untyped on() callback; an untyped command (older app versions) to
+ * the first callback whose type fits the value. Returns nullptr and sets `out`, or
+ * the decline reason.
+ */
+const char* HydroNode::pickHandler(const String& key, const char* wireType, JsonVariant value, const Handler*& out) const {
+    auto it = handlers_.find(key);
+    if (it == handlers_.end() || it->second.empty()) {
+        return "NO_HANDLER";
+    }
+    const std::vector<Handler>& list = it->second;
+    if (wireType) {
+        const Handler* any = nullptr;
+        for (const Handler& h : list) {
+            if (h.type == ValueType::ANY) any = &h;
+            if (h.type != ValueType::ANY && strcmp(typeName(h.type), wireType) == 0) {
+                out = &h;
+                return checkCommand(h, wireType, value);
+            }
+        }
+        if (any) {
+            out = any;
+            return nullptr;
+        }
+        return "TYPE_MISMATCH";
+    }
+    const char* first = nullptr;
+    for (const Handler& h : list) {
+        const char* reason = checkCommand(h, wireType, value);
+        if (!reason) {
+            out = &h;
+            return nullptr;
+        }
+        if (!first) first = reason;
+    }
+    return first;
+}
+
+const char* HydroNode::typeName(ValueType type) {
+    static const char* const NAMES[] = {"ANY", "BOOL", "INT32", "UINT32", "INT64", "UINT64", "STRING"};
+    return NAMES[static_cast<uint8_t>(type)];
+}
+
+/**
  * Returns nullptr if the handler can take the command, otherwise the decline
  * reason. A typed command must name exactly the handler's type. An untyped
  * command (older app versions) is accepted when the value itself fits.
  */
 const char* HydroNode::checkCommand(const Handler& handler, const char* wireType, JsonVariant value) {
-    static const char* const NAMES[] = {"ANY", "BOOL", "INT32", "UINT32", "INT64", "UINT64", "STRING"};
-
     if (handler.type == ValueType::ANY) {
         return nullptr;
     }
-    const char* expected = NAMES[static_cast<uint8_t>(handler.type)];
+    const char* expected = typeName(handler.type);
     if (wireType && strcmp(wireType, expected) != 0) {
         return "TYPE_MISMATCH";
     }
@@ -294,35 +370,64 @@ int HydroNode::postSigned(const char* path, const String& payload, unsigned long
         return ERR_CONNECTION_FAILED;
     }
 
+    // One TLS connection carries all values of a burst (HTTP keep-alive): the handshake costs
+    // seconds on an ESP8266, a request on an open connection a fraction of that. A connection the
+    // server closed in the meantime fails on first use; then the request goes out once more on a
+    // fresh one.
+    for (int attempt = 0; attempt < 2; attempt++) {
+        bool reused = tls_.connected();
+        prepareTls(epoch);
+        http_.connectionKeepAlive();
+        http_.setHttpResponseTimeout(httpTimeoutMs_);
+        http_.beginRequest();
+        int started = http_.post(path);
+        if (started != 0) {
+            http_.stop();
+            if (reused) continue;
+            return started < 0 ? started : ERR_CONNECTION_FAILED;
+        }
+        http_.sendHeader("Content-Type", "application/json");
+        http_.sendHeader("X-Sensor-Id", sensorId_);
+        http_.sendHeader("X-Timestamp", String(epoch));
+        http_.sendHeader("X-Signature", signature);
+        http_.sendHeader("Content-Length", payload.length());
+        http_.beginBody();
+        http_.print(payload);
+        http_.endRequest();
+
+        int statusCode = http_.responseStatusCode();
+        if (statusCode <= 0) {
+            http_.stop();
+            if (reused) continue;
+            return statusCode;
+        }
+        responseOut = http_.responseBody();
+        return statusCode;
+    }
+    return ERR_CONNECTION_FAILED;
+}
+
+void HydroNode::prepareTls(unsigned long epoch) {
 #if defined(ESP8266)
     // BearSSL: parse the roots once, they stay valid for the lifetime of the sketch. ECDSA roots
-    // only: the RSA-4096 ones would take ~6 KB of a heap the handshake needs in full.
+    // only: the RSA-4096 ones would take ~6 KB of a heap the handshake needs in full. The session
+    // lets the next connection resume instead of running the full handshake again (when the
+    // server still knows it).
     static BearSSL::X509List trust(HYDRONODE_CA_BUNDLE_EC);
-    BearSSL::WiFiClientSecure client;
-    client.setTrustAnchors(&trust);
-    client.setX509Time(epoch);
+    static BearSSL::Session session;
+    if (!tlsReady_) {
+        tls_.setTrustAnchors(&trust);
+        tls_.setSession(&session);
+        tlsReady_ = true;
+    }
+    tls_.setX509Time(epoch);
 #else
-    WiFiClientSecure client;
-    client.setCACert(HYDRONODE_CA_BUNDLE);
+    (void)epoch;
+    if (!tlsReady_) {
+        tls_.setCACert(HYDRONODE_CA_BUNDLE);
+        tlsReady_ = true;
+    }
 #endif
-
-    HttpClient http(client, host_, httpsPort_);
-    http.setHttpResponseTimeout(httpTimeoutMs_);
-    http.beginRequest();
-    http.post(path);
-    http.sendHeader("Content-Type", "application/json");
-    http.sendHeader("X-Sensor-Id", sensorId_);
-    http.sendHeader("X-Timestamp", String(epoch));
-    http.sendHeader("X-Signature", signature);
-    http.sendHeader("Content-Length", payload.length());
-    http.beginBody();
-    http.print(payload);
-    http.endRequest();
-
-    int statusCode = http.responseStatusCode();
-    responseOut = http.responseBody();
-    http.stop();
-    return statusCode;
 }
 
 bool HydroNode::isValidType(const char* type) {
