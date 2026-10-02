@@ -7,10 +7,36 @@
 #if defined(ESP8266)
 #include <base64.h>
 #include <bearssl/bearssl_hmac.h>
+#include <user_interface.h>
 #else
 #include <mbedtls/md.h>
 #include <mbedtls/base64.h>
+#include <esp_system.h>
+#include <Preferences.h>
 #endif
+
+// Header values are limited so a long flag list or many failing drivers cannot grow a request.
+static constexpr size_t MAX_FIRMWARE_HEADER = 128;
+static constexpr size_t MAX_STATUS_HEADER = 256;
+static constexpr size_t MAX_READ_ERRORS = 16;
+
+// ESP8266 boot counter: two words at the end of the 512-byte RTC user memory. They survive a
+// restart and deep sleep, not a power cut; the reset reason tells the backend which one it was.
+static constexpr uint32_t RTC_BOOT_SLOT = 126;
+static constexpr uint32_t RTC_BOOT_MAGIC = 0x484E4254;  // "HNBT"
+
+/** Drops characters that would end a header line or a field of it. */
+static String headerSafe(const String& value, bool allowSpaces) {
+    String out;
+    out.reserve(value.length());
+    for (size_t i = 0; i < value.length(); i++) {
+        char c = value[i];
+        if (c == '\r' || c == '\n' || c == ';' || (c == ' ' && !allowSpaces)) continue;
+        if (c < 0x20 || c == 0x7f) continue;
+        out += c;
+    }
+    return out;
+}
 
 // Epoch sanity floor: any synced clock is past 2020-09-13. Values below
 // mean the NTP sync never happened and the system clock is still at 1970.
@@ -106,6 +132,321 @@ void HydroNode::setHttpTimeout(uint32_t ms) {
 
 void HydroNode::setDebug(Stream& stream) {
     debug_ = &stream;
+}
+
+// --- Fleet and OTA hooks ---------------------------------------------------------------------
+
+const char* HydroNode::family() {
+#if defined(ESP8266)
+    return "esp8266";
+#elif defined(CONFIG_IDF_TARGET_ESP32C3)
+    return "esp32c3";
+#elif defined(CONFIG_IDF_TARGET_ESP32C6)
+    return "esp32c6";
+#elif defined(CONFIG_IDF_TARGET_ESP32S2)
+    return "esp32s2";
+#elif defined(CONFIG_IDF_TARGET_ESP32S3)
+    return "esp32s3";
+#else
+    return "esp32";
+#endif
+}
+
+void HydroNode::setFirmwareIdentity(const char* product, const char* version, const char* flags) {
+    product_ = headerSafe(product ? product : "hydronode-lib", false);
+    version_ = headerSafe(version ? version : LIB_VERSION, false);
+    flags_ = headerSafe(flags ? flags : "", true);
+    flags_.trim();
+}
+
+String HydroNode::firmwareHeader() const {
+    String value = product_ + "/" + version_ + " " + family();
+    if (flags_.length() > 0) value += " " + flags_;
+    if (value.length() > MAX_FIRMWARE_HEADER) value = value.substring(0, MAX_FIRMWARE_HEADER);
+    return value;
+}
+
+void HydroNode::reportReadError(const char* driverId) {
+    if (!driverId || !*driverId || readErrors_.size() >= MAX_READ_ERRORS) return;
+    String id;
+    for (const char* c = driverId; *c && id.length() < 64; c++) {
+        bool ok = (*c >= 'a' && *c <= 'z') || (*c >= '0' && *c <= '9') || *c == '_' || *c == '.' || *c == '-';
+        if (ok) id += *c;
+    }
+    if (id.length() == 0) return;
+    for (const String& known : readErrors_) {
+        if (known == id) return;
+    }
+    readErrors_.push_back(id);
+}
+
+void HydroNode::clearReadErrors() {
+    readErrors_.clear();
+}
+
+void HydroNode::setResetReason(const char* reason) {
+    resetOverride_ = reason ? headerSafe(reason, false) : String();
+}
+
+const char* HydroNode::chipResetReason() {
+#if defined(ESP8266)
+    const rst_info* info = ESP.getResetInfoPtr();
+    switch (info ? info->reason : REASON_DEFAULT_RST) {
+        case REASON_DEFAULT_RST:      return "poweron";
+        case REASON_WDT_RST:          return "watchdog";
+        case REASON_EXCEPTION_RST:    return "panic";
+        case REASON_SOFT_WDT_RST:     return "watchdog";
+        case REASON_SOFT_RESTART:     return "software";
+        case REASON_DEEP_SLEEP_AWAKE: return "deepsleep";
+        case REASON_EXT_SYS_RST:      return "external";
+        default:                      return "unknown";
+    }
+#else
+    switch (esp_reset_reason()) {
+        case ESP_RST_POWERON:   return "poweron";
+        case ESP_RST_SW:        return "software";
+        case ESP_RST_PANIC:     return "panic";
+        case ESP_RST_INT_WDT:
+        case ESP_RST_TASK_WDT:
+        case ESP_RST_WDT:       return "watchdog";
+        case ESP_RST_BROWNOUT:  return "brownout";
+        case ESP_RST_DEEPSLEEP: return "deepsleep";
+        case ESP_RST_EXT:       return "external";
+        default:                return "unknown";
+    }
+#endif
+}
+
+/**
+ * Counts cold starts: power-on, crash, watchdog, restart. Waking from deep sleep runs setup()
+ * again but is no new boot, so it only reads the counter. Counted once per run of the sketch.
+ */
+uint32_t HydroNode::bootCount() {
+    if (bootCounted_) return bootCount_;
+    bootCounted_ = true;
+    bool cold = strcmp(chipResetReason(), "deepsleep") != 0;
+#if defined(ESP8266)
+    uint32_t slot[2] = {0, 0};
+    ESP.rtcUserMemoryRead(RTC_BOOT_SLOT, slot, sizeof(slot));
+    if (slot[0] != RTC_BOOT_MAGIC) {
+        slot[0] = RTC_BOOT_MAGIC;
+        slot[1] = 0;
+    }
+    if (cold) slot[1]++;
+    ESP.rtcUserMemoryWrite(RTC_BOOT_SLOT, slot, sizeof(slot));
+    bootCount_ = slot[1];
+#else
+    Preferences prefs;
+    if (prefs.begin("hn-lib", false)) {
+        bootCount_ = prefs.getUInt("boot", 0);
+        if (cold) {
+            bootCount_++;
+            prefs.putUInt("boot", bootCount_);
+        }
+        prefs.end();
+    }
+#endif
+    return bootCount_;
+}
+
+String HydroNode::deviceStatusHeader() {
+    String value = "boot=" + String(bootCount());
+    value += ";reset=";
+    value += resetOverride_.length() > 0 ? resetOverride_ : String(chipResetReason());
+    value += ";uptime=" + String(millis() / 1000UL);
+    if (WiFi.status() == WL_CONNECTED) value += ";rssi=" + String(WiFi.RSSI());
+    value += ";net=wifi;readErr=";
+    bool first = true;
+    for (const String& id : readErrors_) {
+        if (value.length() + id.length() + 1 > MAX_STATUS_HEADER) break;
+        if (!first) value += ",";
+        value += id;
+        first = false;
+    }
+    return value;
+}
+
+void HydroNode::setExtraHeader(const char* name, const String& value) {
+    if (!name || !*name) return;
+    String key = headerSafe(name, false);
+    key.replace(":", "");
+    // Semicolons are part of the X-Ota-* values; only control characters (line breaks) go.
+    String clean;
+    for (size_t i = 0; i < value.length(); i++) {
+        char c = value[i];
+        if (c >= 0x20 && c != 0x7f) clean += c;
+    }
+    for (auto& header : extraHeaders_) {
+        if (header.first.equalsIgnoreCase(key)) {
+            header.second = clean;
+            return;
+        }
+    }
+    extraHeaders_.emplace_back(key, clean);
+}
+
+void HydroNode::clearExtraHeader(const char* name) {
+    if (!name) return;
+    for (auto it = extraHeaders_.begin(); it != extraHeaders_.end(); ++it) {
+        if (it->first.equalsIgnoreCase(name)) {
+            extraHeaders_.erase(it);
+            return;
+        }
+    }
+}
+
+void HydroNode::onResponseKey(const char* key, std::function<void(JsonVariantConst)> handler) {
+    if (!key || strcmp(key, "commands") == 0) return;
+    responseHandlers_[String(key)] = handler;
+}
+
+void HydroNode::sendDeviceHeaders() {
+    http_.sendHeader("X-Firmware", firmwareHeader().c_str());
+    http_.sendHeader("X-Device-Status", deviceStatusHeader().c_str());
+    for (const auto& header : extraHeaders_) {
+        http_.sendHeader(header.first.c_str(), header.second.c_str());
+    }
+}
+
+bool HydroNode::sendOtaAck(const char* job, const char* result, const char* reason) {
+    if (!job || !result) return false;
+    if (WiFi.status() != WL_CONNECTED) {
+        dbg("sendOtaAck: WiFi not connected");
+        return false;
+    }
+    unsigned long epoch = 0;
+    if (!ensureTimeSynced(epoch)) {
+        dbg("sendOtaAck: NTP time not synced");
+        return false;
+    }
+    JsonDocument doc;
+    doc["job"] = job;
+    doc["result"] = result;
+    if (reason && *reason) doc["reason"] = reason;
+    String payload;
+    serializeJson(doc, payload);
+
+    String response;
+    int statusCode = postSigned(otaAckPath_, payload, epoch, response);
+    dbg("sendOtaAck: " + String(result) + " -> HTTP " + String(statusCode));
+    return statusCode >= 200 && statusCode < 300;
+}
+
+HydroNode::DownloadResult HydroNode::downloadSigned(const char* pathAndQuery, size_t offset, ChunkHandler onChunk) {
+    DownloadResult result{ERR_CONNECTION_FAILED, 0, 0};
+    if (!pathAndQuery || !onChunk) return result;
+    if (WiFi.status() != WL_CONNECTED) {
+        result.status = ERR_WIFI_DISCONNECTED;
+        return result;
+    }
+    unsigned long epoch = 0;
+    if (!ensureTimeSynced(epoch)) {
+        result.status = ERR_TIME_NOT_SYNCED;
+        return result;
+    }
+    // A GET has no body: the signature covers what is asked for (path and query) and when.
+    String signature = sign(String(pathAndQuery) + String(epoch));
+    if (signature.length() == 0) return result;
+
+    for (int attempt = 0; attempt < 2; attempt++) {
+        bool reused = tls_.connected();
+        prepareTls(epoch);
+        http_.connectionKeepAlive();
+        http_.setHttpResponseTimeout(httpTimeoutMs_);
+        http_.beginRequest();
+        int started = http_.get(pathAndQuery);
+        if (started != 0) {
+            http_.stop();
+            if (reused) continue;
+            result.status = started < 0 ? started : ERR_CONNECTION_FAILED;
+            return result;
+        }
+        http_.sendHeader("X-Sensor-Id", sensorId_);
+        http_.sendHeader("X-Timestamp", String(epoch).c_str());
+        http_.sendHeader("X-Signature", signature.c_str());
+        sendDeviceHeaders();
+        if (offset > 0) http_.sendHeader("Range", ("bytes=" + String((unsigned long)offset) + "-").c_str());
+        http_.endRequest();
+
+        int status = http_.responseStatusCode();
+        if (status <= 0) {
+            http_.stop();
+            if (reused) continue;
+            result.status = status;
+            return result;
+        }
+        result.status = status;
+
+        long rangeTotal = -1;
+        while (http_.headerAvailable()) {
+            String name = http_.readHeaderName();
+            String value = http_.readHeaderValue();
+            if (name.equalsIgnoreCase("Content-Range")) {
+                int slash = value.lastIndexOf('/');
+                if (slash >= 0 && value.substring(slash + 1) != "*") rangeTotal = value.substring(slash + 1).toInt();
+            }
+        }
+        if (status != 200 && status != 206) {
+            http_.stop();
+            dbg("downloadSigned: HTTP " + String(status));
+            return result;
+        }
+        long length = http_.contentLength();
+        bool chunked = http_.isResponseChunked();
+        result.total = rangeTotal >= 0 ? (size_t)rangeTotal : (status == 200 && length >= 0 ? (size_t)length : 0);
+        // A server that ignored the range sends the whole file: skip what we already have.
+        size_t skip = (status == 200) ? offset : 0;
+
+        uint8_t buffer[1024];
+        size_t received = 0;
+        uint32_t lastData = millis();
+        while (length < 0 || received < (size_t)length) {
+            if (chunked && http_.endOfBodyReached()) break;
+            int available = http_.available();
+            if (available <= 0) {
+                if (!http_.connected()) break;
+                if (millis() - lastData > httpTimeoutMs_) {
+                    http_.stop();
+                    dbg("downloadSigned: timeout after " + String((unsigned long)received) + " bytes");
+                    result.status = ERR_CONNECTION_FAILED;
+                    return result;
+                }
+                delay(1);
+                continue;
+            }
+            size_t want = sizeof(buffer);
+            if (length >= 0 && (size_t)length - received < want) want = (size_t)length - received;
+            int n = 0;
+            if (chunked) {
+                // Chunked bodies are decoded byte by byte by the HTTP client.
+                while ((size_t)n < want && http_.available() > 0) {
+                    int c = http_.read();
+                    if (c < 0) break;
+                    buffer[n++] = (uint8_t)c;
+                }
+            } else {
+                n = http_.read(buffer, want);
+            }
+            if (n <= 0) continue;
+            lastData = millis();
+            received += (size_t)n;
+            size_t start = 0;
+            if (skip > 0) {
+                start = skip < (size_t)n ? skip : (size_t)n;
+                skip -= start;
+            }
+            if (start < (size_t)n) {
+                if (!onChunk(buffer + start, (size_t)n - start)) {
+                    http_.stop();
+                    return result;
+                }
+                result.bytes += (size_t)n - start;
+            }
+        }
+        if (length < 0 && !chunked) http_.stop();
+        return result;
+    }
+    return result;
 }
 
 bool HydroNode::forceSync() {
@@ -227,9 +568,21 @@ void HydroNode::handleResponse(const String& response) {
     }
 
     JsonArray commands = doc["commands"].as<JsonArray>();
-    if (commands.isNull() || commands.size() == 0) {
-        return;
+    if (!commands.isNull() && commands.size() > 0) {
+        handleCommands(commands);
     }
+
+    // Further keys (ota, config, ...) after the commands: an update may restart the board.
+    for (const auto& entry : responseHandlers_) {
+        JsonVariantConst value = doc[entry.first];
+        if (!value.isNull()) {
+            dbg("response key: " + entry.first);
+            entry.second(value);
+        }
+    }
+}
+
+void HydroNode::handleCommands(JsonArray commands) {
 
     // 1. Decide per command: run it, or decline it with a reason.
     JsonDocument answer;
@@ -390,6 +743,7 @@ int HydroNode::postSigned(const char* path, const String& payload, unsigned long
         http_.sendHeader("X-Sensor-Id", sensorId_);
         http_.sendHeader("X-Timestamp", String(epoch));
         http_.sendHeader("X-Signature", signature);
+        sendDeviceHeaders();
         http_.sendHeader("Content-Length", payload.length());
         http_.beginBody();
         http_.print(payload);

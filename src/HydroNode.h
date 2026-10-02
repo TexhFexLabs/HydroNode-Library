@@ -43,6 +43,9 @@
  */
 class HydroNode {
 public:
+    /** Library version, sent as `hydronode-lib/<version>` unless setFirmwareIdentity() says otherwise. */
+    static constexpr const char* LIB_VERSION = "1.6.0";
+
     // Error codes returned by sendValue() (positive values are HTTP status codes).
     static constexpr int ERR_WIFI_DISCONNECTED = -1;  // WiFi not connected
     static constexpr int ERR_TIME_NOT_SYNCED   = -2;  // NTP sync failed (signature would be rejected)
@@ -151,6 +154,82 @@ public:
     /** Enable debug logging, e.g. hydro.setDebug(Serial). */
     void setDebug(Stream& stream);
 
+    // --- Fleet and OTA hooks (1.6.0) ---------------------------------------------------------
+    //
+    // Every request carries two headers the HydroNode fleet view reads:
+    //   X-Firmware:      hydronode-lib/1.6.0 esp32c3
+    //   X-Device-Status: boot=12;reset=poweron;uptime=45;rssi=-61;net=wifi;readErr=
+    // A sketch built on the library needs nothing for that. The universal HydroNode firmware uses
+    // the rest of this block for updates over the air.
+
+    /**
+     * Replaces the default `hydronode-lib/<version>` in X-Firmware, e.g.
+     *   hydro.setFirmwareIdentity("hydronode", "0.5.0", "ota cfg=14");
+     * gives `hydronode/0.5.0 esp32c3 ota cfg=14`. The chip family is always added by the library.
+     */
+    void setFirmwareIdentity(const char* product, const char* version, const char* flags = nullptr);
+
+    /** The X-Firmware value sent with every request (at most 128 characters). */
+    String firmwareHeader() const;
+
+    /**
+     * The X-Device-Status value: boot counter (cold starts only), reset reason, uptime in seconds,
+     * WiFi RSSI, network and the drivers that failed to read since clearReadErrors().
+     */
+    String deviceStatusHeader();
+
+    /** Marks a driver whose reading failed this round, e.g. reportReadError("bme280"). */
+    void reportReadError(const char* driverId);
+
+    /** Starts a new round without read errors. */
+    void clearReadErrors();
+
+    /**
+     * Reports this reset reason instead of the chip's own, e.g. "ota" after restarting into new
+     * firmware. One of poweron, software, panic, watchdog, brownout, deepsleep, external, ota,
+     * unknown. Pass nullptr to go back to the chip's reason.
+     */
+    void setResetReason(const char* reason);
+
+    /**
+     * An extra header sent with every request until cleared, e.g. X-Ota-State while new firmware
+     * proves itself. Setting the same name again replaces the value.
+     */
+    void setExtraHeader(const char* name, const String& value);
+    void clearExtraHeader(const char* name);
+
+    /**
+     * Callback for a key in the backend's answer to sendValue() other than "commands", e.g.
+     * "ota" or "config". Runs after the commands of the same answer. Unknown keys are ignored.
+     */
+    void onResponseKey(const char* key, std::function<void(JsonVariantConst)> handler);
+
+    /**
+     * Reports the outcome of an update job, signed like every request:
+     * POST /api/webhook/sensor-ota-ack {"job":"...","result":"downloaded","reason":"..."}.
+     * result: downloaded, verified, failed or config_applied. Returns true on a 2xx answer.
+     */
+    bool sendOtaAck(const char* job, const char* result, const char* reason = nullptr);
+
+    /** Gets the bytes of a download in order. Return false to stop. */
+    using ChunkHandler = std::function<bool(const uint8_t* data, size_t length)>;
+
+    struct DownloadResult {
+        int status;    // HTTP status (200/206) or a negative ERR_* code
+        size_t bytes;  // bytes handed to the callback in this call
+        size_t total;  // full size from Content-Range/Content-Length, 0 if unknown
+    };
+
+    /**
+     * Signed GET of a file from the backend, e.g. a firmware image: the signature covers the
+     * path with query and the timestamp. With offset > 0 it resumes with "Range: bytes=<offset>-".
+     * The bytes stream to `onChunk` in pieces of up to 1 KB; nothing is buffered as a whole.
+     */
+    DownloadResult downloadSigned(const char* pathAndQuery, size_t offset, ChunkHandler onChunk);
+
+    /** Chip family as the backend knows it: esp32, esp32s2, esp32s3, esp32c3, esp32c6, esp8266. */
+    static const char* family();
+
     /**
      * Wraps a plain function into an untyped handler with ArduinoJson's lenient
      * conversion. Kept for sketches from version 1.2.0 and older; new code
@@ -167,6 +246,16 @@ private:
     const char* host_;
     const char* path_;
     const char* ackPath_ = "/api/webhook/sensor-command-ack";
+    const char* otaAckPath_ = "/api/webhook/sensor-ota-ack";
+    String product_ = "hydronode-lib";
+    String version_ = LIB_VERSION;
+    String flags_;
+    String resetOverride_;
+    std::vector<String> readErrors_;
+    std::vector<std::pair<String, String>> extraHeaders_;
+    std::map<String, std::function<void(JsonVariantConst)>> responseHandlers_;
+    uint32_t bootCount_ = 0;
+    bool bootCounted_ = false;
     size_t jsonBufferSize_ = 8192;
     uint32_t httpTimeoutMs_ = 10000;
     Stream* debug_ = nullptr;
@@ -200,7 +289,11 @@ private:
     String sign(const String& message);
     int postSigned(const char* path, const String& payload, unsigned long epoch, String& responseOut);
     void prepareTls(unsigned long epoch);
+    void sendDeviceHeaders();
+    uint32_t bootCount();
+    static const char* chipResetReason();
     void handleResponse(const String& response);
+    void handleCommands(JsonArray commands);
     void addHandler(const String& key, ValueType type, std::function<void(JsonVariant)> fn);
     const char* pickHandler(const String& key, const char* wireType, JsonVariant value, const Handler*& out) const;
     static const char* typeName(ValueType type);

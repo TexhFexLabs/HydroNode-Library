@@ -42,6 +42,7 @@ hydro.sendValue("TEMPERATURE", 21.5);
 - **WiFi your way** — use the built-in `connectWiFi()` helper, a WiFiManager captive portal, or your own connection management. The library never touches WiFi unless you ask it to.
 - **Honest error reporting** — `sendValue()` returns the HTTP status code or a descriptive error code, so your firmware can retry intelligently.
 - **Lightweight** — no background tasks, no heap surprises, RAM-friendly.
+- **Shows up in the fleet view** — since 1.6.0 every request says which firmware runs and how the board is doing (boot counter, reset reason, signal). Hooks for updates over the air are built in.
 
 **Board support: ESP32 (all variants) and ESP8266 (4 MB flash recommended).** TLS uses `WiFiClientSecure` with the bundled root certificates: mbedTLS on ESP32, BearSSL on ESP8266. The ESP8266 has little RAM for TLS; keep the rest of the sketch lean.
 
@@ -219,6 +220,40 @@ A declined command is never run. Commands without a type (sent by older app vers
 
 **Untyped callbacks.** `on(name, void(JsonVariant))` receives any value without a type check, for commands that accept several types. Sketches written for version 1.2.0 and older (`hydro.on("pump", HydroNode::bindCallback<int>(pumpCallback))`) keep compiling and working.
 
+### Fleet and OTA hooks (1.6.0)
+
+Every request now carries two headers for the HydroNode fleet view. A sketch needs nothing for that:
+
+```
+X-Firmware: hydronode-lib/1.6.0 esp32c3
+X-Device-Status: boot=12;reset=poweron;uptime=45;rssi=-61;net=wifi;readErr=
+```
+
+`boot` counts cold starts (power-on, crash, watchdog, restart), not wake-ups from deep sleep. On the ESP32 it lives in NVS (namespace `hn-lib`), on the ESP8266 in the last 8 bytes of the RTC user memory, so there it starts again at 1 after a power cut. `reset` is one of `poweron`, `software`, `panic`, `watchdog`, `brownout`, `deepsleep`, `external`, `ota`, `unknown`.
+
+| Method | Purpose |
+|---|---|
+| `setFirmwareIdentity(product, version, flags)` | Replaces `hydronode-lib/1.6.0`. The universal firmware sends `hydronode/0.5.0 esp32c3 ota cfg=14`. The chip family is always added |
+| `reportReadError("bme280")` / `clearReadErrors()` | Drivers that failed to read this round, sent as `readErr=bme280` |
+| `setResetReason("ota")` | Reports this reset reason instead of the chip's own (nullptr: the chip's again) |
+| `setExtraHeader(name, value)` / `clearExtraHeader(name)` | A header on every request until cleared, e.g. `X-Ota-State` |
+| `onResponseKey("ota", fn)` | Callback for a key in the answer to `sendValue()` besides `commands`. Runs after the commands of the same answer |
+| `sendOtaAck(job, result, reason)` | Signed `POST /api/webhook/sensor-ota-ack` with `{"job","result","reason"}`. `result`: `downloaded`, `verified`, `failed`, `config_applied` |
+| `downloadSigned(pathAndQuery, offset, onChunk)` | Signed GET that streams a file in 1 KB pieces to `onChunk`, resuming with `Range: bytes=<offset>-`. Returns status, bytes and total size |
+
+```cpp
+hydro.onResponseKey("ota", [](JsonVariantConst offer) {
+  const char* job = offer["job"];
+  size_t done = 0;
+  auto result = hydro.downloadSigned(offer["url"], done, [&](const uint8_t* data, size_t n) {
+    return writeToUpdateSlot(data, n);   // return false to stop
+  });
+  hydro.sendOtaAck(job, result.status == 200 || result.status == 206 ? "downloaded" : "failed");
+});
+```
+
+A GET has no body, so its signature covers the path with query and the timestamp: `X-Signature` = Base64(HMAC-SHA256(`/api/device-ota/v1/image?job=…` + timestamp)). The `Range` header is not signed.
+
 ### Tuning
 
 | Method | Default | Purpose |
@@ -230,7 +265,7 @@ A declined command is never run. Commands without a type (sent by older app vers
 
 ## Security model
 
-- **Authentication**: every request (values and command ACKs) carries `X-Signature` = Base64(HMAC-SHA256(payload + timestamp)) computed with your secret key. The key never leaves the device.
+- **Authentication**: every request (values, command and update ACKs) carries `X-Signature` = Base64(HMAC-SHA256(payload + timestamp)) computed with your secret key; a signed download signs its path and query instead of a body. The key never leaves the device.
 - **Command delivery**: the backend hands out queued commands only in responses to correctly signed value submissions — an attacker who knows your sensor ID cannot fetch them.
 - **Replay protection**: `X-Timestamp` must be within ±2 minutes of server time. The library syncs via NTP before each send and refuses to transmit with an unsynced clock (`ERR_TIME_NOT_SYNCED`) instead of sending a doomed request.
 - **Transport**: TLS 1.2+ against a bundled root CA set (Google Trust Services, ISRG/Let's Encrypt, SSL.com — the roots Cloudflare Universal SSL chains to). All bundled roots are valid until at least 2035, so certificate rotation on the server side never requires a reflash.
