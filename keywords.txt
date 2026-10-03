@@ -25,6 +25,21 @@ setJsonBufferSize	KEYWORD2
 setHttpTimeout	KEYWORD2
 setDebug	KEYWORD2
 bindCallback	KEYWORD2
+syncTime	KEYWORD2
+epochMs	KEYWORD2
+closeConnection	KEYWORD2
+setFirmwareIdentity	KEYWORD2
+firmwareHeader	KEYWORD2
+deviceStatusHeader	KEYWORD2
+reportReadError	KEYWORD2
+clearReadErrors	KEYWORD2
+setResetReason	KEYWORD2
+setExtraHeader	KEYWORD2
+clearExtraHeader	KEYWORD2
+onResponseKey	KEYWORD2
+sendOtaAck	KEYWORD2
+downloadSigned	KEYWORD2
+family	KEYWORD2
 
 #######################################
 # Constants (LITERAL1)
@@ -34,3 +49,4 @@ ERR_TIME_NOT_SYNCED	LITERAL1
 ERR_CONNECTION_FAILED	LITERAL1
 ERR_INVALID_TYPE	LITERAL1
 ERR_INVALID_VALUE	LITERAL1
+LIB_VERSION	LITERAL1
