@@ -254,6 +254,8 @@ hydro.onResponseKey("ota", [](JsonVariantConst offer) {
 
 A GET has no body, so its signature covers the path with query and the timestamp: `X-Signature` = Base64(HMAC-SHA256(`/api/device-ota/v1/image?job=…` + timestamp)). The `Range` header is not signed.
 
+A sketch built on the library appears in the HydroNode fleet view as **own sketch**, with its health, restarts, signal and read errors. HydroNode updates only its universal firmware over the air (flashed with the device builder); the hooks above are the building blocks if a sketch wants its own update path. How the universal firmware uses them, including the offer format, verification and rollback, is described in [hydronode-firmware/docs/OTA.md](https://github.com/TexhFexLabs/hydronode-firmware/blob/main/docs/OTA.md). Changes per version: [CHANGELOG.md](CHANGELOG.md).
+
 ### Tuning
 
 | Method | Default | Purpose |
