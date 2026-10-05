@@ -17,9 +17,14 @@
 #include <WiFiClientSecure.h>
 #endif
 #include <ArduinoHttpClient.h>
-#include <NTPClient.h>
 #include <WiFiUdp.h>
 #include "HydroNodeCerts.h"
+
+/** One measurement for HydroNode::sendValues(): sensor type (e.g. "TEMPERATURE") and value. */
+struct HydroNodeValue {
+    const char* type;
+    float value;
+};
 
 /**
  * HydroNode — Arduino client for the HydroNode IoT backend.
@@ -40,18 +45,26 @@
  *       hydro.sendValue("TEMPERATURE", 21.5);
  *       delay(10000);   // backend accepts one value per type every 10 s
  *   }
+ *
+ * Several values of one reading go out in one request:
+ *
+ *   HydroNodeValue v[] = {{"TEMPERATURE", t}, {"HUMIDITY", h}};
+ *   hydro.sendValues(v, 2);
  */
 class HydroNode {
 public:
     /** Library version, sent as `hydronode-lib/<version>` unless setFirmwareIdentity() says otherwise. */
-    static constexpr const char* LIB_VERSION = "1.6.0";
+    static constexpr const char* LIB_VERSION = "1.7.0";
 
     // Error codes returned by sendValue() (positive values are HTTP status codes).
     static constexpr int ERR_WIFI_DISCONNECTED = -1;  // WiFi not connected
-    static constexpr int ERR_TIME_NOT_SYNCED   = -2;  // NTP sync failed (signature would be rejected)
+    static constexpr int ERR_TIME_NOT_SYNCED   = -2;  // no valid time, NTP failed (signature would be rejected)
     static constexpr int ERR_CONNECTION_FAILED = -3;  // TLS/TCP connection or HTTP transport error
     static constexpr int ERR_INVALID_TYPE      = -4;  // type is not A-Z, 0-9, _ starting with a letter
     static constexpr int ERR_INVALID_VALUE     = -5;  // value is NaN or infinite
+
+    /** Most values sendValues() puts into one request; further ones are skipped (ERR_INVALID_VALUE). */
+    static constexpr size_t MAX_VALUES_PER_REQUEST = 64;
 
     HydroNode(
         const char* sensorId,
@@ -61,7 +74,8 @@ public:
     );
 
     /**
-     * Initialize the NTP client. Call once in setup(), after WiFi is connected.
+     * Call once in setup(). Since 1.7.0 there is nothing to start: the time is fetched on demand
+     * before the first request. Kept so existing sketches stay unchanged.
      */
     void begin();
 
@@ -90,6 +104,23 @@ public:
     int sendValue(const char* type, float value);
 
     /**
+     * Sends all values in one request: they arrive together and carry one timestamp, the time they were
+     * measured (`ageMs` milliseconds before the call; 0 = now). Returns the HTTP status (202 when at
+     * least one value was accepted) or a negative ERR_*. `codes` (optional, `count` entries) gets per
+     * value 202, the status the server gave that value (429 rate limit, 400 invalid, 503), a local
+     * ERR_INVALID_TYPE / ERR_INVALID_VALUE (value skipped, not sent), or the request's status.
+     *
+     *   HydroNodeValue v[] = {{"TEMPERATURE", t}, {"HUMIDITY", h}};
+     *   int codes[2];
+     *   hydro.sendValues(v, 2, codes);
+     *
+     * Each type may appear once (later duplicates: ERR_INVALID_TYPE), at most MAX_VALUES_PER_REQUEST
+     * values per call. Commands and other answer keys arrive as with sendValue(). A backend older
+     * than the batch endpoint gets one sendValue() per value instead (signed with the current time).
+     */
+    int sendValues(const HydroNodeValue* values, size_t count, int* codes = nullptr, uint32_t ageMs = 0);
+
+    /**
      * Command callbacks. Register one per command name and value type; the
      * type must match what you pick in the HydroNode app. One name may carry
      * several types, each with its own callback:
@@ -98,7 +129,7 @@ public:
      *   hydro.onUInt32("lamp", [](uint32_t ms) { pulse(LAMP_PIN, ms); });
      *   hydro.onUInt32("co2_calibration", [](uint32_t v) { sensor.calibrate(v); });
      *
-     * Commands arrive in the response of sendValue(). Before any callback
+     * Commands arrive in the response of sendValue() and sendValues(). Before any callback
      * runs, the library answers the backend (signed): commands with a
      * matching callback are confirmed, all others are declined with a reason
      * (NO_HANDLER, TYPE_MISMATCH, INVALID_VALUE) that the app shows.
@@ -119,20 +150,30 @@ public:
     void on(const String& key, std::function<void(JsonVariant)> handler);
 
     /**
-     * Fetches the time from NTP now. sendValue() syncs on its own; call this when the clock
-     * stood still meanwhile, as it does in ESP8266 light sleep, so the next value is signed
-     * with the right time. Needs WiFi. Returns false when no time server answered.
+     * Fetches the time from NTP now and sets the system clock (millisecond precision). Sending
+     * syncs on its own when the clock is not valid or the last sync is older than the resync
+     * interval; call this when the clock stood still meanwhile, as it does in ESP8266 light
+     * sleep, so the next value is signed with the right time. Needs WiFi. Returns false when no
+     * time server answered.
      */
     bool syncTime();
 
     /**
-     * Milliseconds since 1970 from the last NTP sync (seconds resolution at the sync), 0
-     * before the first one. Runs on millis() in between.
+     * Milliseconds since 1970 from the system clock, 0 while it is not valid (no sync yet).
+     * On the ESP32 the clock keeps running through deep sleep, on the ESP8266 it starts again
+     * at every boot.
      */
     uint64_t epochMs() const;
 
     /**
-     * Closes the TLS connection that sendValue() keeps open between calls. Values sent in a
+     * How old the last time sync may get before a request fetches the time again (default 1800 s).
+     * The clock drifts slowly, mostly in ESP32 deep sleep; a timestamp the backend rejects
+     * triggers a resync and one retry anyway. 0 syncs before every request.
+     */
+    void setTimeResyncInterval(uint32_t seconds);
+
+    /**
+     * Closes the TLS connection that sendValue() and sendValues() keep open between calls. Values sent in a
      * row share one connection (one handshake); close it after the last one, before the board
      * sleeps or waits for a long time. The next sendValue() simply connects again.
      */
@@ -157,7 +198,7 @@ public:
     // --- Fleet and OTA hooks (1.6.0) ---------------------------------------------------------
     //
     // Every request carries two headers the HydroNode fleet view reads:
-    //   X-Firmware:      hydronode-lib/1.6.0 esp32c3
+    //   X-Firmware:      hydronode-lib/1.7.0 esp32c3
     //   X-Device-Status: boot=12;reset=poweron;uptime=45;rssi=-61;net=wifi;readErr=
     // A sketch built on the library needs nothing for that. The universal HydroNode firmware uses
     // the rest of this block for updates over the air.
@@ -199,7 +240,8 @@ public:
     void clearExtraHeader(const char* name);
 
     /**
-     * Callback for a key in the backend's answer to sendValue() other than "commands", e.g.
+     * Callback for a key in the backend's answer to sendValue() or sendValues() other than
+     * "commands", e.g.
      * "ota" or "config". Runs after the commands of the same answer. Unknown keys are ignored.
      */
     void onResponseKey(const char* key, std::function<void(JsonVariantConst)> handler);
@@ -245,6 +287,7 @@ private:
     const char* secretKey_;
     const char* host_;
     const char* path_;
+    const char* batchPath_ = "/api/webhook/sensor-values";
     const char* ackPath_ = "/api/webhook/sensor-command-ack";
     const char* otaAckPath_ = "/api/webhook/sensor-ota-ack";
     String product_ = "hydronode-lib";
@@ -267,6 +310,7 @@ private:
 #endif
     HttpClient http_;
     bool tlsReady_ = false;
+    bool batchUnsupported_ = false;  // the backend answered the batch path with 404/405
 
     enum class ValueType : uint8_t { ANY, BOOL, INT32, UINT32, INT64, UINT64, STRING };
 
@@ -278,21 +322,27 @@ private:
     std::map<String, std::vector<Handler>> handlers_;
 
     WiFiUDP ntpUDP_;
-    NTPClient timeClient_;
+    uint32_t resyncIntervalS_ = 1800;
+    bool syncFailed_ = false;      // the last sync attempt got no answer ...
+    uint32_t syncFailedAtMs_ = 0;  // ... at this millis(), see ensureTimeSynced()
 
     bool ensureTimeSynced(unsigned long& epochOut);
     bool forceSync();
-    void noteSync();
-    unsigned long syncedEpoch_ = 0;
-    uint32_t syncedAtMs_ = 0;
+    bool sntpQuery(const char* server);
+    bool resyncAfterRejection(int statusCode, const String& response);
+    unsigned long measuredAt(uint32_t ageMs) const;
     static bool isValidType(const char* type);
     String sign(const String& message);
+    String valuePayload(const char* type, float value, unsigned long epoch) const;
+    String batchPayload(const HydroNodeValue* values, const std::vector<size_t>& sent, unsigned long epoch) const;
+    int sendEach(const HydroNodeValue* values, const std::vector<size_t>& sent, int* codes);
     int postSigned(const char* path, const String& payload, unsigned long epoch, String& responseOut);
-    void prepareTls(unsigned long epoch);
+    void prepareTls();
     void sendDeviceHeaders();
     uint32_t bootCount();
     static const char* chipResetReason();
-    void handleResponse(const String& response);
+    bool parseResponse(const String& response, JsonDocument& doc);
+    void handleResponse(JsonDocument& doc);
     void handleCommands(JsonArray commands);
     void addHandler(const String& key, ValueType type, std::function<void(JsonVariant)> fn);
     const char* pickHandler(const String& key, const char* wireType, JsonVariant value, const Handler*& out) const;
