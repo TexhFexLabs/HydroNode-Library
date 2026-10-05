@@ -42,9 +42,27 @@ static String headerSafe(const String& value, bool allowSpaces) {
 // mean the NTP sync never happened and the system clock is still at 1970.
 static constexpr unsigned long MIN_VALID_EPOCH = 1600000000UL;
 
+// SNTP (RFC 4330): one 48-byte request per server, an answer within a second or the next server.
+static constexpr uint16_t NTP_PORT = 123;
+static constexpr uint32_t NTP_TIMEOUT_MS = 1000;
+static constexpr size_t NTP_PACKET_SIZE = 48;
+// NTP counts seconds since 1900; the Unix epoch starts 70 years (2208988800 s) later.
+static constexpr uint64_t NTP_UNIX_OFFSET = 2208988800ULL;
+// After a sync without answer a valid clock is used as it is; the next try waits this long.
+static constexpr uint32_t SYNC_RETRY_MS = 60000;
+
+// Unix seconds of the last successful sync; the system clock itself is the time source. On the
+// ESP32 both survive deep sleep (RTC memory and RTC timer), so a wake-up with a recent sync
+// needs no NTP exchange. The ESP8266 clock starts at 1970 after every boot: synced per boot.
+#if defined(ESP8266)
+static int64_t lastSyncS = 0;
+#else
+static RTC_DATA_ATTR int64_t lastSyncS = 0;
+#endif
+
 HydroNode::HydroNode(const char* sensorId, const char* secretKey, const char* host, const char* path)
     : sensorId_(sensorId), secretKey_(secretKey), host_(host), path_(path),
-      http_(tls_, host, 443), timeClient_(ntpUDP_, "pool.ntp.org")
+      http_(tls_, host, 443)
 {
 }
 
@@ -53,8 +71,7 @@ void HydroNode::closeConnection() {
 }
 
 void HydroNode::begin() {
-    timeClient_.begin();
-    timeClient_.setTimeOffset(0);
+    // Nothing to start: ensureTimeSynced() fetches the time before the first request.
 }
 
 bool HydroNode::connectWiFi(const char* ssid, const char* password, uint32_t timeoutMs) {
@@ -132,6 +149,10 @@ void HydroNode::setHttpTimeout(uint32_t ms) {
 
 void HydroNode::setDebug(Stream& stream) {
     debug_ = &stream;
+}
+
+void HydroNode::setTimeResyncInterval(uint32_t seconds) {
+    resyncIntervalS_ = seconds;
 }
 
 // --- Fleet and OTA hooks ---------------------------------------------------------------------
@@ -350,7 +371,7 @@ HydroNode::DownloadResult HydroNode::downloadSigned(const char* pathAndQuery, si
 
     for (int attempt = 0; attempt < 2; attempt++) {
         bool reused = tls_.connected();
-        prepareTls(epoch);
+        prepareTls();
         http_.connectionKeepAlive();
         http_.setHttpResponseTimeout(httpTimeoutMs_);
         http_.beginRequest();
@@ -449,24 +470,92 @@ HydroNode::DownloadResult HydroNode::downloadSigned(const char* pathAndQuery, si
     return result;
 }
 
-bool HydroNode::forceSync() {
-    // One unanswered UDP packet must not cost the reading: try the next server instead of the
-    // same one again. Back to the pool afterwards for regular updates.
-    static const char* const servers[] = {"pool.ntp.org", "time.google.com", "time.cloudflare.com"};
+/** Reads a 64-bit NTP timestamp (seconds since 1900, 32-bit fraction) as microseconds since 1970. */
+static uint64_t ntpToUnixUs(const uint8_t* p) {
+    uint32_t seconds = (uint32_t(p[0]) << 24) | (uint32_t(p[1]) << 16) | (uint32_t(p[2]) << 8) | p[3];
+    uint32_t fraction = (uint32_t(p[4]) << 24) | (uint32_t(p[5]) << 16) | (uint32_t(p[6]) << 8) | p[7];
+    uint64_t s = seconds;
+    // The 32-bit seconds roll over in February 2036: small values belong to the next era.
+    if (s < NTP_UNIX_OFFSET) s += 0x100000000ULL;
+    return (s - NTP_UNIX_OFFSET) * 1000000ULL + ((uint64_t(fraction) * 1000000ULL) >> 32);
+}
+
+/**
+ * One SNTP exchange with `server`. On a valid answer it sets the system clock with the
+ * server's transmit time plus half the network round trip, to the millisecond.
+ */
+bool HydroNode::sntpQuery(const char* server) {
+    uint8_t request[NTP_PACKET_SIZE] = {0};
+    request[0] = 0x23;  // leap indicator 0, version 4, mode 3 (client)
+    // The transmit timestamp comes back as "originate" and tells the answer to this request from
+    // a late one to an earlier request. A random nonce, not the time: the clock may be at 1970.
+#if defined(ESP8266)
+    uint32_t nonce[2] = {RANDOM_REG32, RANDOM_REG32};
+#else
+    uint32_t nonce[2] = {esp_random(), esp_random()};
+#endif
+    memcpy(request + 40, nonce, sizeof(nonce));
+
+    if (!ntpUDP_.begin(0)) return false;  // any free local port
     bool ok = false;
-    for (int attempt = 0; attempt < 3 && !ok; attempt++) {
-        timeClient_.setPoolServerName(servers[attempt]);
-        dbg("NTP: forcing update via " + String(servers[attempt]));
-        ok = timeClient_.forceUpdate() && timeClient_.getEpochTime() >= MIN_VALID_EPOCH;
+    if (ntpUDP_.beginPacket(server, NTP_PORT) && ntpUDP_.write(request, sizeof(request)) == sizeof(request)) {
+        uint32_t sentUs = micros();
+        if (ntpUDP_.endPacket()) {
+            uint32_t startMs = millis();
+            while (!ok && millis() - startMs < NTP_TIMEOUT_MS) {
+                int size = ntpUDP_.parsePacket();
+                if (size <= 0) {
+                    delay(1);
+                    continue;
+                }
+                uint32_t receivedUs = micros();
+                uint8_t reply[NTP_PACKET_SIZE];
+                int got = ntpUDP_.read(reply, sizeof(reply));
+                while (ntpUDP_.available() > 0) ntpUDP_.read();  // extension fields, MAC
+                if (got < (int)sizeof(reply) || memcmp(reply + 24, request + 40, 8) != 0) continue;
+                uint8_t leap = reply[0] >> 6, mode = reply[0] & 0x07, stratum = reply[1];
+                if (leap == 3 || mode != 4 || stratum == 0 || stratum > 15) {
+                    dbg("NTP: " + String(server) + " is not synchronized");
+                    break;
+                }
+                uint64_t serverReceived = ntpToUnixUs(reply + 32);
+                uint64_t serverSent = ntpToUnixUs(reply + 40);
+                if (serverSent < uint64_t(MIN_VALID_EPOCH) * 1000000ULL || serverSent < serverReceived) break;
+                // Network time = round trip minus the time the server held the request.
+                int64_t network = int64_t(receivedUs - sentUs) - int64_t(serverSent - serverReceived);
+                if (network < 0) network = 0;
+                uint64_t nowUs = serverSent + uint64_t(network / 2) + (micros() - receivedUs);
+
+                int64_t before = (int64_t)epochMs();
+                struct timeval tv;
+                tv.tv_sec = (time_t)(nowUs / 1000000ULL);
+                tv.tv_usec = (suseconds_t)(nowUs % 1000000ULL);
+                settimeofday(&tv, nullptr);
+                lastSyncS = (int64_t)tv.tv_sec;
+                String drift = before > 0 ? ", clock was off by " + String((long)(int64_t(nowUs / 1000ULL) - before)) + " ms" : String();
+                dbg("NTP: synced via " + String(server) + " (round trip " + String((long)((receivedUs - sentUs) / 1000UL)) + " ms" + drift + ")");
+                ok = true;
+            }
+        }
     }
-    timeClient_.setPoolServerName(servers[0]);
-    if (ok) noteSync();
+    ntpUDP_.stop();
     return ok;
 }
 
-void HydroNode::noteSync() {
-    syncedEpoch_ = timeClient_.getEpochTime();
-    syncedAtMs_ = millis();
+bool HydroNode::forceSync() {
+    // One unanswered UDP packet must not cost the reading: try the next server instead of the
+    // same one again.
+    static const char* const servers[] = {"pool.ntp.org", "time.google.com", "time.cloudflare.com"};
+    for (const char* server : servers) {
+        if (sntpQuery(server)) {
+            syncFailed_ = false;
+            return true;
+        }
+        dbg("NTP: no answer from " + String(server));
+    }
+    syncFailed_ = true;
+    syncFailedAtMs_ = millis();
+    return false;
 }
 
 bool HydroNode::syncTime() {
@@ -475,32 +564,54 @@ bool HydroNode::syncTime() {
 }
 
 uint64_t HydroNode::epochMs() const {
-    if (syncedEpoch_ == 0) return 0;
-    return uint64_t(syncedEpoch_) * 1000ULL + (millis() - syncedAtMs_);
+    struct timeval tv;
+    gettimeofday(&tv, nullptr);
+    if (tv.tv_sec < (time_t)MIN_VALID_EPOCH) return 0;
+    return uint64_t(tv.tv_sec) * 1000ULL + uint64_t(tv.tv_usec) / 1000ULL;
 }
 
 bool HydroNode::ensureTimeSynced(unsigned long& epochOut) {
-    // The backend rejects timestamps outside a small replay window
-    // (currently +/- 2 minutes), so an unsynced or stale clock means a
-    // guaranteed 401. Retry the NTP sync a few times before giving up.
-    if (timeClient_.update()) noteSync();
-    if (timeClient_.getEpochTime() < MIN_VALID_EPOCH) forceSync();
-
-    unsigned long epoch = timeClient_.getEpochTime();
-    if (epoch < MIN_VALID_EPOCH) {
+    // The backend rejects timestamps outside a small replay window (currently +/- 2 minutes), so
+    // an unsynced clock means a guaranteed 401. A recent sync is good enough, also one from before
+    // a deep sleep on the ESP32: no NTP exchange, no extra radio time. The TLS stack checks
+    // certificate dates against the same system clock, so it must be valid before connecting.
+    time_t now = time(nullptr);
+    bool valid = now >= (time_t)MIN_VALID_EPOCH;
+    int64_t age = int64_t(now) - lastSyncS;
+    bool due = !valid || lastSyncS == 0 || age < 0 || age >= (int64_t)resyncIntervalS_;
+    // A valid clock without NTP answer is still used; no new try for a while, each costs seconds.
+    bool waiting = valid && syncFailed_ && millis() - syncFailedAtMs_ < SYNC_RETRY_MS;
+    if (due && !waiting) {
+        if (!forceSync() && valid) dbg("NTP: keeping the current clock");
+        now = time(nullptr);
+    }
+    if (now < (time_t)MIN_VALID_EPOCH) {
         return false;
     }
-
-    // The TLS stack validates certificate notBefore/notAfter against the system
-    // clock, which starts at 1970 after boot (NTPClient does not set it).
-    // Sync it once from NTP so TLS certificate validation can succeed.
-    if (time(nullptr) < (time_t)MIN_VALID_EPOCH) {
-        struct timeval tv = { (time_t)epoch, 0 };
-        settimeofday(&tv, nullptr);
-    }
-
-    epochOut = epoch;
+    epochOut = (unsigned long)now;
     return true;
+}
+
+/**
+ * The backend answers a timestamp outside its window with 401 "Invalid timestamp": the clock
+ * drifted (ESP32 deep sleep) or stood still (ESP8266 light sleep). Fetches the time again;
+ * true when the request should go out once more, re-signed with the fresh time.
+ */
+bool HydroNode::resyncAfterRejection(int statusCode, const String& response) {
+    if (statusCode != 401 || !response.startsWith("Invalid timestamp")) return false;
+    dbg("backend rejected the timestamp, syncing the time again");
+    return forceSync();
+}
+
+/** Unix seconds of a measurement taken `ageMs` before now. */
+unsigned long HydroNode::measuredAt(uint32_t ageMs) const {
+    uint64_t now = epochMs();
+    return (unsigned long)((now - (ageMs < now ? ageMs : now)) / 1000ULL);
+}
+
+/** Part of the HMAC contract with the backend: key order, 2 decimal places, no whitespace. */
+String HydroNode::valuePayload(const char* type, float value, unsigned long epoch) const {
+    return "{\"sensorId\":\"" + String(sensorId_) + "\",\"type\":\"" + type + "\",\"value\":" + String(value, 2) + ",\"timestamp\":" + String(epoch) + "}";
 }
 
 int HydroNode::sendValue(const char* type, float value) {
@@ -526,12 +637,11 @@ int HydroNode::sendValue(const char* type, float value) {
         return ERR_TIME_NOT_SYNCED;
     }
 
-    // Payload format is part of the HMAC contract with the backend —
-    // key order, 2 decimal places and zero whitespace must not change.
-    String payload = "{\"sensorId\":\"" + String(sensorId_) + "\",\"type\":\"" + type + "\",\"value\":" + String(value, 2) + ",\"timestamp\":" + String(epoch) + "}";
-
     String response;
-    int statusCode = postSigned(path_, payload, epoch, response);
+    int statusCode = postSigned(path_, valuePayload(type, value, epoch), epoch, response);
+    if (resyncAfterRejection(statusCode, response) && ensureTimeSynced(epoch)) {
+        statusCode = postSigned(path_, valuePayload(type, value, epoch), epoch, response);
+    }
     if (statusCode <= 0) {
         dbg("sendValue: transport error " + String(statusCode));
         return ERR_CONNECTION_FAILED;
@@ -539,10 +649,132 @@ int HydroNode::sendValue(const char* type, float value) {
 
     dbg("sendValue: " + String(type) + "=" + String(value, 2) + " -> HTTP " + String(statusCode));
 
-    if (statusCode == 202 && response.length() > 0) {
-        handleResponse(response);
+    JsonDocument doc;
+    if (statusCode == 202 && parseResponse(response, doc)) {
+        handleResponse(doc);
     }
     return statusCode;
+}
+
+/** Part of the HMAC contract with the backend like valuePayload(): the backend rebuilds this text. */
+String HydroNode::batchPayload(const HydroNodeValue* values, const std::vector<size_t>& sent, unsigned long epoch) const {
+    String out;
+    out.reserve(72 + sent.size() * 48);
+    out += "{\"sensorId\":\"";
+    out += sensorId_;
+    out += "\",\"timestamp\":";
+    out += String(epoch);
+    out += ",\"values\":[";
+    for (size_t k = 0; k < sent.size(); k++) {
+        if (k) out += ',';
+        out += "{\"type\":\"";
+        out += values[sent[k]].type;
+        out += "\",\"value\":";
+        out += String(values[sent[k]].value, 2);
+        out += '}';
+    }
+    out += "]}";
+    return out;
+}
+
+/** A backend without the batch endpoint: one request per value, as before 1.7.0. */
+int HydroNode::sendEach(const HydroNodeValue* values, const std::vector<size_t>& sent, int* codes) {
+    int best = ERR_CONNECTION_FAILED;
+    for (size_t i : sent) {
+        int code = sendValue(values[i].type, values[i].value);
+        if (codes) codes[i] = code;
+        if (code >= 200 && code < 300) best = code;
+        else if (best < 200 || best >= 300) best = code;
+    }
+    return best;
+}
+
+int HydroNode::sendValues(const HydroNodeValue* values, size_t count, int* codes, uint32_t ageMs) {
+    // Checked before any network work, like sendValue(): invalid entries are skipped, the rest go.
+    std::vector<size_t> sent;
+    sent.reserve(count);
+    for (size_t i = 0; i < count; i++) {
+        int local = 0;
+        if (!isValidType(values[i].type)) {
+            local = ERR_INVALID_TYPE;
+        } else if (!isfinite(values[i].value) || sent.size() >= MAX_VALUES_PER_REQUEST) {
+            local = ERR_INVALID_VALUE;
+        } else {
+            for (size_t k : sent) {
+                if (strcmp(values[k].type, values[i].type) == 0) local = ERR_INVALID_TYPE;  // once per type
+            }
+        }
+        if (codes) codes[i] = local;
+        if (local) dbg("sendValues: skipping '" + String(values[i].type ? values[i].type : "") + "' (" + String(local) + ")");
+        else sent.push_back(i);
+    }
+    if (sent.empty()) return ERR_INVALID_VALUE;
+
+    auto fail = [&](int code) {
+        if (codes) {
+            for (size_t i : sent) codes[i] = code;
+        }
+        return code;
+    };
+    if (WiFi.status() != WL_CONNECTED) {
+        dbg("sendValues: WiFi not connected");
+        return fail(ERR_WIFI_DISCONNECTED);
+    }
+    if (batchUnsupported_) return sendEach(values, sent, codes);
+    unsigned long epoch = 0;
+    if (!ensureTimeSynced(epoch)) {
+        dbg("sendValues: NTP time not synced, aborting (backend would reject the signature)");
+        return fail(ERR_TIME_NOT_SYNCED);
+    }
+
+    epoch = measuredAt(ageMs);
+    String response;
+    int statusCode = postSigned(batchPath_, batchPayload(values, sent, epoch), epoch, response);
+    if (resyncAfterRejection(statusCode, response)) {
+        epoch = measuredAt(ageMs);
+        statusCode = postSigned(batchPath_, batchPayload(values, sent, epoch), epoch, response);
+    }
+    if (statusCode == 404 || statusCode == 405) {
+        dbg("sendValues: the backend has no batch endpoint, sending one by one");
+        batchUnsupported_ = true;
+        return sendEach(values, sent, codes);
+    }
+    if (statusCode <= 0) {
+        dbg("sendValues: transport error " + String(statusCode));
+        return fail(ERR_CONNECTION_FAILED);
+    }
+    dbg("sendValues: " + String((unsigned)sent.size()) + " values -> HTTP " + String(statusCode));
+
+    // Every value shares the request's status, except the ones the answer lists as rejected.
+    fail(statusCode);
+    JsonDocument doc;
+    if (parseResponse(response, doc)) {
+        for (JsonObjectConst rejected : doc["rejected"].as<JsonArrayConst>()) {
+            const char* type = rejected["type"];
+            int status = rejected["status"] | 0;
+            if (!type || !codes) continue;
+            for (size_t i : sent) {
+                if (strcmp(values[i].type, type) == 0) codes[i] = status;
+            }
+        }
+        if (statusCode >= 200 && statusCode < 300) handleResponse(doc);
+    }
+    return statusCode;
+}
+
+/** Parses a JSON answer; plain-text answers (errors) and empty ones are no document. */
+bool HydroNode::parseResponse(const String& response, JsonDocument& doc) {
+    if (response.length() == 0 || response[0] != '{') return false;
+    if (response.length() > jsonBufferSize_) {
+        dbg("handleResponse: response of " + String(response.length()) + " bytes exceeds the limit, consider setJsonBufferSize()");
+        return false;
+    }
+    DeserializationError err = deserializeJson(doc, response);
+    if (err) {
+        dbg("handleResponse: JSON parse failed (" + String(err.c_str()) + ")");
+        return false;
+    }
+    return true;
 }
 
 /**
@@ -554,19 +786,7 @@ int HydroNode::sendValue(const char* type, float value) {
  * callback runs, so a long-running handler (e.g. a pump with delay) cannot
  * push it outside the backend's replay window.
  */
-void HydroNode::handleResponse(const String& response) {
-    if (response.length() > jsonBufferSize_) {
-        dbg("handleResponse: response of " + String(response.length()) + " bytes exceeds the limit, consider setJsonBufferSize()");
-        return;
-    }
-
-    JsonDocument doc;
-    DeserializationError err = deserializeJson(doc, response);
-    if (err) {
-        dbg("handleResponse: JSON parse failed (" + String(err.c_str()) + ")");
-        return;
-    }
-
+void HydroNode::handleResponse(JsonDocument& doc) {
     JsonArray commands = doc["commands"].as<JsonArray>();
     if (!commands.isNull() && commands.size() > 0) {
         handleCommands(commands);
@@ -705,7 +925,7 @@ bool HydroNode::sendAck(JsonArrayConst accepted, JsonArrayConst declined) {
     String payload;
     serializeJson(doc, payload);
 
-    unsigned long epoch = timeClient_.getEpochTime();
+    unsigned long epoch = (unsigned long)time(nullptr);
     String response;
     int statusCode = postSigned(ackPath_, payload, epoch, response);
     if (statusCode != 200) {
@@ -729,7 +949,7 @@ int HydroNode::postSigned(const char* path, const String& payload, unsigned long
     // fresh one.
     for (int attempt = 0; attempt < 2; attempt++) {
         bool reused = tls_.connected();
-        prepareTls(epoch);
+        prepareTls();
         http_.connectionKeepAlive();
         http_.setHttpResponseTimeout(httpTimeoutMs_);
         http_.beginRequest();
@@ -761,7 +981,7 @@ int HydroNode::postSigned(const char* path, const String& payload, unsigned long
     return ERR_CONNECTION_FAILED;
 }
 
-void HydroNode::prepareTls(unsigned long epoch) {
+void HydroNode::prepareTls() {
 #if defined(ESP8266)
     // BearSSL: parse the roots once, they stay valid for the lifetime of the sketch. ECDSA roots
     // only: the RSA-4096 ones would take ~6 KB of a heap the handshake needs in full. The session
@@ -774,9 +994,8 @@ void HydroNode::prepareTls(unsigned long epoch) {
         tls_.setSession(&session);
         tlsReady_ = true;
     }
-    tls_.setX509Time(epoch);
+    tls_.setX509Time(time(nullptr));  // the clock ensureTimeSynced() made valid
 #else
-    (void)epoch;
     if (!tlsReady_) {
         tls_.setCACert(HYDRONODE_CA_BUNDLE);
         tlsReady_ = true;

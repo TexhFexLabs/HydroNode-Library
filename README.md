@@ -37,9 +37,10 @@ hydro.sendValue("TEMPERATURE", 21.5);
 ## Features
 
 - **Secure by default** — every request is signed with HMAC-SHA256 and sent over TLS. The root CA bundle ships with the library (valid until 2035+), no certificate handling needed.
-- **Replay protection built in** — the backend only accepts requests within a ±2 minute window; the library syncs time via NTP automatically before every send.
+- **Replay protection built in** — the backend only accepts requests within a ±2 minute window; the library keeps the clock in sync via NTP on its own (to the millisecond, only when the last sync is older than 30 minutes).
 - **Typed backend commands** — switch a lamp, run a pump or write a calibration value from the HydroNode app. Each command has a value type (`BOOL`, `INT32`, `UINT32`, `INT64`, `UINT64`, `STRING`) that must match your callback. The app shows every command as *Confirmed* or *Declined* with the reason.
 - **WiFi your way** — use the built-in `connectWiFi()` helper, a WiFiManager captive portal, or your own connection management. The library never touches WiFi unless you ask it to.
+- **One request per reading** — `sendValues()` sends all values of a reading together, with the time they were measured. Saves a round trip per value.
 - **Honest error reporting** — `sendValue()` returns the HTTP status code or a descriptive error code, so your firmware can retry intelligently.
 - **Lightweight** — no background tasks, no heap surprises, RAM-friendly.
 - **Shows up in the fleet view** — since 1.6.0 every request says which firmware runs and how the board is doing (boot counter, reset reason, signal). Hooks for updates over the air are built in.
@@ -60,10 +61,9 @@ Install the library via Arduino IDE → Sketch → Include Library → Add .ZIP 
 |---|---|
 | [ArduinoJson](https://github.com/bblanchon/ArduinoJson) 7.x | Parsing backend responses |
 | [ArduinoHttpClient](https://github.com/arduino-libraries/ArduinoHttpClient) | HTTP transport |
-| [NTPClient](https://github.com/arduino-libraries/NTPClient) | Time sync (required for signatures) |
 | [WiFiManager](https://github.com/tzapu/WiFiManager) (tzapu) | Only for the captive-portal example |
 
-Signing (HMAC-SHA256) and Base64 use the TLS library that ships with the board package: mbedTLS on ESP32, BearSSL on ESP8266. Nothing extra to install. Up to version 1.2.0 the library needed `Crypto` and `base64_arduino`; you can uninstall them if nothing else uses them.
+Signing (HMAC-SHA256) and Base64 use the TLS library that ships with the board package: mbedTLS on ESP32, BearSSL on ESP8266. Nothing extra to install. Up to version 1.2.0 the library needed `Crypto` and `base64_arduino`, up to 1.6.0 `NTPClient`; you can uninstall them if nothing else uses them.
 
 ## Quick Start
 
@@ -125,7 +125,7 @@ Constructor. `host` defaults to `hydronode.tech`, `path` to `/api/webhook/sensor
 Versions up to 1.2.0 used `hydronode.texhfexlabs.de`. That host stays available, so devices already in the field keep working without a reflash.
 
 ### `void begin()`
-Starts the NTP client. Call once in `setup()` after WiFi is available.
+Call once in `setup()`. Since 1.7.0 there is nothing to start; the time is fetched before the first request.
 
 ### `bool connectWiFi(ssid, password, timeoutMs = 30000)`
 Optional WiFi helper. Returns `false` on timeout.
@@ -150,13 +150,25 @@ Sends one signed measurement. Returns the HTTP status code, or a negative error:
 
 `type` must start with an upper case letter and may contain `A`–`Z`, `0`–`9` and `_`, at most 64 characters. The library checks this before sending. Common `type` values: `TEMPERATURE`, `HUMIDITY`, `PRESSURE`, `CO2`, `PM25`, `PM10`, `VOC`, `SOIL_MOISTURE`, `SOIL_TEMPERATURE`, `WATER_TEMPERATURE`, `WATER_PH`, `WATER_EC`, `BATTERY_VOLTAGE` — see the [sensor type reference](https://hydronode.tech/docs/guide/sensor-types/) for the full list of 30+ types with units and scales.
 
+### `int sendValues(const HydroNodeValue* values, size_t count, int* codes = nullptr, uint32_t ageMs = 0)`
+
+Sends all values of one reading in one request (since 1.7.0). They arrive together and carry one timestamp: the time they were measured, `ageMs` milliseconds before the call (0 = now).
+
+```cpp
+HydroNodeValue v[] = {{"TEMPERATURE", t}, {"HUMIDITY", h}};
+int codes[2];
+int status = hydro.sendValues(v, 2, codes);
+```
+
+Returns the HTTP status (`202` when at least one value was accepted) or a negative error as for `sendValue()`. `codes` gets the result per value: `202`, the status the backend gave that value (`429` rate limited, `400` invalid, `503`), or `ERR_INVALID_TYPE` / `ERR_INVALID_VALUE` for a value the library skipped without sending. Each type may appear once per call, at most 64 values. Commands arrive in the answer as with `sendValue()`. Against a backend without the batch endpoint the library falls back to one `sendValue()` per value.
+
 ### `void closeConnection()`
 
 Values sent in a row share one TLS connection (HTTP keep-alive): the handshake takes seconds on an ESP8266, every further value a fraction of that. Close the connection after the last value of a round, before the board sleeps or waits for a long time. The next `sendValue()` connects again.
 
 ### `bool syncTime()` and `uint64_t epochMs()`
 
-`sendValue()` keeps the time in sync on its own. In ESP8266 light sleep the clock stands still, so call `syncTime()` after waking up and before sending. `epochMs()` returns the time of the last sync plus `millis()` since then (0 before the first sync), handy to start readings on a fixed schedule.
+Sending keeps the time in sync on its own: when the clock is not valid yet or the last sync is older than 30 minutes (`setTimeResyncInterval(seconds)`), it asks an NTP server and sets the system clock to the millisecond. On the ESP32 the clock keeps running through deep sleep, so a wake-up sends without an NTP exchange; the ESP8266 syncs once per boot. A timestamp the backend rejects triggers a resync and one retry. In ESP8266 light sleep the clock stands still, so call `syncTime()` after waking up and before sending. `epochMs()` returns the system clock in milliseconds (0 while it is not valid), handy to start readings on a fixed schedule.
 
 ### Commands: `onBool`, `onInt32`, `onUInt32`, `onInt64`, `onUInt64`, `onString`
 
@@ -225,7 +237,7 @@ A declined command is never run. Commands without a type (sent by older app vers
 Every request now carries two headers for the HydroNode fleet view. A sketch needs nothing for that:
 
 ```
-X-Firmware: hydronode-lib/1.6.0 esp32c3
+X-Firmware: hydronode-lib/1.7.0 esp32c3
 X-Device-Status: boot=12;reset=poweron;uptime=45;rssi=-61;net=wifi;readErr=
 ```
 
@@ -233,7 +245,7 @@ X-Device-Status: boot=12;reset=poweron;uptime=45;rssi=-61;net=wifi;readErr=
 
 | Method | Purpose |
 |---|---|
-| `setFirmwareIdentity(product, version, flags)` | Replaces `hydronode-lib/1.6.0`. The universal firmware sends `hydronode/0.5.0 esp32c3 ota cfg=14`. The chip family is always added |
+| `setFirmwareIdentity(product, version, flags)` | Replaces `hydronode-lib/1.7.0`. The universal firmware sends `hydronode/0.5.0 esp32c3 ota cfg=14`. The chip family is always added |
 | `reportReadError("bme280")` / `clearReadErrors()` | Drivers that failed to read this round, sent as `readErr=bme280` |
 | `setResetReason("ota")` | Reports this reset reason instead of the chip's own (nullptr: the chip's again) |
 | `setExtraHeader(name, value)` / `clearExtraHeader(name)` | A header on every request until cleared, e.g. `X-Ota-State` |
@@ -262,6 +274,7 @@ A sketch built on the library appears in the HydroNode fleet view as **own sketc
 |---|---|---|
 | `setDebug(Serial)` | off | Log WiFi/NTP/HTTP activity to any `Stream` |
 | `setHttpTimeout(ms)` | 10000 | HTTP response timeout |
+| `setTimeResyncInterval(s)` | 1800 | How old the last time sync may get before a request syncs again |
 | `setJsonBufferSize(bytes)` | 8192 | Largest response the library parses. Fits the backend maximum of 8 commands per delivery |
 | `getApName()` | — | `"HydroNode-Setup-XXXX"` (last 4 chars of sensor ID), for WiFiManager |
 
@@ -269,7 +282,7 @@ A sketch built on the library appears in the HydroNode fleet view as **own sketc
 
 - **Authentication**: every request (values, command and update ACKs) carries `X-Signature` = Base64(HMAC-SHA256(payload + timestamp)) computed with your secret key; a signed download signs its path and query instead of a body. The key never leaves the device.
 - **Command delivery**: the backend hands out queued commands only in responses to correctly signed value submissions — an attacker who knows your sensor ID cannot fetch them.
-- **Replay protection**: `X-Timestamp` must be within ±2 minutes of server time. The library syncs via NTP before each send and refuses to transmit with an unsynced clock (`ERR_TIME_NOT_SYNCED`) instead of sending a doomed request.
+- **Replay protection**: `X-Timestamp` must be within ±2 minutes of server time. The library keeps the clock synced via NTP and refuses to transmit with an unsynced clock (`ERR_TIME_NOT_SYNCED`) instead of sending a doomed request.
 - **Transport**: TLS 1.2+ against a bundled root CA set (Google Trust Services, ISRG/Let's Encrypt, SSL.com — the roots Cloudflare Universal SSL chains to). All bundled roots are valid until at least 2035, so certificate rotation on the server side never requires a reflash.
 - **Rate limiting**: the backend accepts one value per sensor and type every 10 seconds. Different types may be sent right after each other.
 - **Actuators**: command values come over the network. Clamp them in your handler to what your hardware can safely do (see the `ActuatorControl` example).

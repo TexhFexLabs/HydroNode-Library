@@ -6,6 +6,32 @@ All notable changes to HydroNode-Library are documented here. The format follows
 
 ## [Unreleased]
 
+## [1.7.0] - 2026-10-05
+
+### Added
+
+- `sendValues(values, count, codes, ageMs)` sends all values of one reading in one request to
+  `/api/webhook/sensor-values`. They arrive together and carry one timestamp, the time they were
+  measured (`ageMs` before the call). `codes` gets the status per value (202, 429, ...). One
+  request instead of one per value saves a round trip per value and radio time. A backend without
+  the batch endpoint (404/405) gets one `sendValue()` per value instead.
+- `setTimeResyncInterval(seconds)`: how old the last time sync may get (default 30 min).
+
+### Changed
+
+- Time comes from the system clock, set by a built-in SNTP query to the millisecond on every sync
+  (before: whole seconds, the system clock set once). Requests sync only when the clock is not
+  valid or the last sync is older than the resync interval, no longer every 60 s with a blocking
+  exchange. On the ESP32 the clock and the last sync survive deep sleep: a wake-up with a recent
+  sync sends without an NTP exchange. The ESP8266 still syncs once per boot.
+- A value the backend rejects with 401 "Invalid timestamp" triggers a resync and one retry.
+- `epochMs()` reads the system clock (millisecond resolution).
+
+### Removed
+
+- The dependency on NTPClient.
+
+
 ## [1.6.0] - 2026-10-02
 
 ### Added
