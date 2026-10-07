@@ -6,6 +6,14 @@ All notable changes to HydroNode-Library are documented here. The format follows
 
 ## [Unreleased]
 
+## [1.7.1] - 2026-10-07
+
+### Changed
+
+- `library.properties` points `url` to the Arduino guide on hydronode.tech, so the Arduino Library
+  Manager and PlatformIO link to the documentation instead of the repository.
+- README links the step-by-step guides on the HydroNode blog. No code changes.
+
 ## [1.7.0] - 2026-10-05
 
 ### Added
