@@ -237,7 +237,7 @@ A declined command is never run. Commands without a type (sent by older app vers
 Every request now carries two headers for the HydroNode fleet view. A sketch needs nothing for that:
 
 ```
-X-Firmware: hydronode-lib/1.7.0 esp32c3
+X-Firmware: hydronode-lib/1.7.1 esp32c3
 X-Device-Status: boot=12;reset=poweron;uptime=45;rssi=-61;net=wifi;readErr=
 ```
 
@@ -245,7 +245,7 @@ X-Device-Status: boot=12;reset=poweron;uptime=45;rssi=-61;net=wifi;readErr=
 
 | Method | Purpose |
 |---|---|
-| `setFirmwareIdentity(product, version, flags)` | Replaces `hydronode-lib/1.7.0`. The universal firmware sends `hydronode/0.5.0 esp32c3 ota cfg=14`. The chip family is always added |
+| `setFirmwareIdentity(product, version, flags)` | Replaces `hydronode-lib/1.7.1`. The universal firmware sends `hydronode/0.5.0 esp32c3 ota cfg=14`. The chip family is always added |
 | `reportReadError("bme280")` / `clearReadErrors()` | Drivers that failed to read this round, sent as `readErr=bme280` |
 | `setResetReason("ota")` | Reports this reset reason instead of the chip's own (nullptr: the chip's again) |
 | `setExtraHeader(name, value)` / `clearExtraHeader(name)` | A header on every request until cleared, e.g. `X-Ota-State` |
@@ -314,6 +314,15 @@ For development or trial setups, contact **support@hydronode.tech**.
 - [Getting started with Arduino/ESP32](https://hydronode.tech/docs/guide/arduino/) — step-by-step guide for this library
 - [LoRaWAN integration](https://hydronode.tech/docs/guide/lorawan/) — battery-powered sensors without WiFi
 - [Home Assistant integration](https://github.com/TexhFexLabs/hydronode-homeassistant) — your HydroNode sensors as native HA entities (HACS)
+
+## Guides
+
+Step-by-step walkthroughs with screenshots on the [HydroNode blog](https://hydronode.tech/blog/):
+
+- [Your first ESP32 sensor with this library](https://hydronode.tech/blog/esp32-arduino-library-quickstart/): install, wire a BME280, send a whole reading with `sendValues()`, switch a relay with typed commands
+- [Debugging with the device console](https://hydronode.tech/blog/debug-with-device-console/): read 401, 429 and type errors, check the device clock, test commands from a prompt
+- [Anomalies, ranges and AI analysis](https://hydronode.tech/blog/anomaly-detection-and-ai-analysis/): what HydroNode does with your readings
+- [No code at all](https://hydronode.tech/blog/esp32-c3-without-code/): the Device Builder flashes the same kind of sensor from the browser and updates it over the air
 
 ## License
 

@@ -54,7 +54,7 @@ struct HydroNodeValue {
 class HydroNode {
 public:
     /** Library version, sent as `hydronode-lib/<version>` unless setFirmwareIdentity() says otherwise. */
-    static constexpr const char* LIB_VERSION = "1.7.0";
+    static constexpr const char* LIB_VERSION = "1.7.1";
 
     // Error codes returned by sendValue() (positive values are HTTP status codes).
     static constexpr int ERR_WIFI_DISCONNECTED = -1;  // WiFi not connected
@@ -198,7 +198,7 @@ public:
     // --- Fleet and OTA hooks (1.6.0) ---------------------------------------------------------
     //
     // Every request carries two headers the HydroNode fleet view reads:
-    //   X-Firmware:      hydronode-lib/1.7.0 esp32c3
+    //   X-Firmware:      hydronode-lib/1.7.1 esp32c3
     //   X-Device-Status: boot=12;reset=poweron;uptime=45;rssi=-61;net=wifi;readErr=
     // A sketch built on the library needs nothing for that. The universal HydroNode firmware uses
     // the rest of this block for updates over the air.
