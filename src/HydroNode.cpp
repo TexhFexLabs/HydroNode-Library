@@ -333,12 +333,15 @@ void HydroNode::setDeviceConfig(const HydroNodeDeviceConfig& config) {
                 config_.recoveryMv == config.recoveryMv && config_.standbyMv == config.standbyMv &&
                 config_.resumeMv == config.resumeMv && config_.cells == config.cells &&
                 config_.capacityMah == config.capacityMah && config_.revision == config.revision &&
-                sameText(config_.source, config.source) && sameText(config_.gauge, config.gauge);
+                sameText(config_.source, config.source) && sameText(config_.gauge, config.gauge) &&
+                sameText(config_.error, config.error);
     configSource_ = config.source ? config.source : "";
     configGauge_ = config.gauge ? config.gauge : "";
+    configError_ = config.error ? config.error : "";
     config_ = config;
     config_.source = configSource_.length() > 0 ? configSource_.c_str() : nullptr;
     config_.gauge = configGauge_.length() > 0 ? configGauge_.c_str() : nullptr;
+    config_.error = configError_.length() > 0 ? configError_.c_str() : nullptr;
     if (config.powerState) powerState_ = headerSafe(config.powerState, false);
     config_.powerState = powerState_.length() > 0 ? powerState_.c_str() : nullptr;
     configSet_ = true;

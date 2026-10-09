@@ -341,6 +341,7 @@ private:
     HydroNodeDeviceConfig config_;
     String configSource_;
     String configGauge_;
+    String configError_;
     String powerState_;
     bool configSet_ = false;
     bool configDue_ = true;          // send X-Device-Config with the next request

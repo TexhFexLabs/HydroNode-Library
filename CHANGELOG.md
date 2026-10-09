@@ -15,6 +15,8 @@ All notable changes to HydroNode-Library are documented here. The format follows
   `X-Device-Config: v=1 rev=7 int=300 save=3500 rec=3300 sby=3200 res=3600 src=bat cells=1 pwr=normal`.
   Sent with the first request after boot, after a change and after a refusal. HydroNode shows the
   values in the sensor settings under "On the device".
+- `HydroNodeDeviceConfig.error` reports a problem of the board itself as `err=`, e.g.
+  `no_measurement` when thresholds are set but nothing measures the battery.
 - `onSettings(callback)` takes changed values from HydroNode (answer key `settings`). Return
   `true` to keep them: the library reports them with their revision (`rev=`). Return `false` to
   refuse (`rej=`). Values that break the rules (interval 10 to 604800 s, gaps between the

@@ -64,7 +64,7 @@ size_t formatDeviceConfig(char* out, size_t size, const HydroNodeDeviceConfig& c
     appendToken(out, size, length, "pwr", c.powerState);
     if (acceptsSettings) append(out, size, length, "caps=settings");
     if (rejectedRevision >= 0) appendNumber(out, size, length, "rej", static_cast<uint32_t>(rejectedRevision));
-    appendToken(out, size, length, "err", error);
+    appendToken(out, size, length, "err", error ? error : c.error);
     return length;
 }
 

@@ -251,6 +251,13 @@ static void deviceConfigHeader() {
     CHECK_STR(format(empty, false).c_str(), "v=1 rev=0");
     CHECK_STR(format(empty, true, 0).c_str(), "v=1 rev=0 caps=settings rej=0");
 
+    // An error of the board itself; a refusal's reason wins.
+    HydroNodeDeviceConfig noMeasurement;
+    noMeasurement.source = "bat";
+    noMeasurement.error = "no_measurement";
+    CHECK_STR(format(noMeasurement, false).c_str(), "v=1 rev=0 src=bat err=no_measurement");
+    CHECK_STR(format(noMeasurement, false, 3, "invalid").c_str(), "v=1 rev=0 src=bat rej=3 err=invalid");
+
     HydroNodeDeviceConfig usb;
     usb.intervalSeconds = 60;
     usb.source = "USB";

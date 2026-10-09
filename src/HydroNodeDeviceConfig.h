@@ -23,6 +23,7 @@ struct HydroNodeDeviceConfig {
     uint32_t capacityMah = 0;
     const char* powerState = nullptr; // "normal", "save", "recovery" or "standby"
     uint16_t revision = 0;            // the settings revision these values came with, 0 = own defaults
+    const char* error = nullptr;      // err= when nothing was refused, e.g. "no_measurement"
 };
 
 /**
@@ -51,7 +52,7 @@ constexpr uint32_t INTERVAL_MAX_S = 604800;
 /**
  * Writes the X-Device-Config value into `out` (NUL-terminated, at most DEVICE_CONFIG_MAX
  * characters; a key that does not fit is left out whole). `rejectedRevision` >= 0 adds
- * rej=<rev>, `error` adds err=<reason>. Text values keep only a-z, 0-9 and _. Returns the length.
+ * rej=<rev>, `error` adds err=<reason> (else config.error). Text values keep only a-z, 0-9 and _. Returns the length.
  */
 size_t formatDeviceConfig(char* out, size_t size, const HydroNodeDeviceConfig& config, bool acceptsSettings,
                           int32_t rejectedRevision = -1, const char* error = nullptr);
