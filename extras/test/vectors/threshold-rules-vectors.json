@@ -1,0 +1,31 @@
+{
+  "_comment": "Power-Sync threshold rules (MASTER §5) as one table. Pack mV, expected = fields that break a rule (sorted, unique). Web, firmware, library and station test against the same rows.",
+  "cases": [
+    {"name": "LiPo preset", "chemistry": "LIPO", "cells": 1, "save": 3500, "recovery": 3300, "standby": 3200, "resume": 3600, "expected": []},
+    {"name": "Li-ion preset", "chemistry": "LI_ION", "cells": 1, "save": 3450, "recovery": 3200, "standby": 3000, "resume": 3500, "expected": []},
+    {"name": "LiFePO4 preset", "chemistry": "LIFEPO4", "cells": 1, "save": 3100, "recovery": 3000, "standby": 2800, "resume": 3200, "expected": []},
+    {"name": "LiPo preset 2S", "chemistry": "LIPO", "cells": 2, "save": 7000, "recovery": 6600, "standby": 6400, "resume": 7200, "expected": []},
+    {"name": "smallest gaps", "chemistry": "LIPO", "cells": 1, "save": 3350, "recovery": 3300, "standby": 3250, "resume": 3400, "expected": []},
+    {"name": "standby too close to recovery", "chemistry": "LIPO", "cells": 1, "save": 3500, "recovery": 3300, "standby": 3251, "resume": 3600, "expected": ["standby"]},
+    {"name": "recovery too close to save", "chemistry": "LIPO", "cells": 1, "save": 3349, "recovery": 3300, "standby": 3200, "resume": 3600, "expected": ["recovery"]},
+    {"name": "resume too close to recovery", "chemistry": "LIPO", "cells": 1, "save": 3500, "recovery": 3300, "standby": 3200, "resume": 3399, "expected": ["resume"]},
+    {"name": "resume far above save", "chemistry": "LIPO", "cells": 1, "save": 3500, "recovery": 3300, "standby": 3200, "resume": 3901, "expected": ["resume"]},
+    {"name": "resume exactly save + 400", "chemistry": "LIPO", "cells": 1, "save": 3500, "recovery": 3300, "standby": 3200, "resume": 3900, "expected": []},
+    {"name": "standby below LiPo range", "chemistry": "LIPO", "cells": 1, "save": 3500, "recovery": 3300, "standby": 2799, "resume": 3600, "expected": ["standby"]},
+    {"name": "save above LiPo range", "chemistry": "LIPO", "cells": 1, "save": 4101, "recovery": 3300, "standby": 3200, "resume": 3800, "expected": ["save"]},
+    {"name": "LiPo values on LiFePO4", "chemistry": "LIFEPO4", "cells": 1, "save": 3500, "recovery": 3300, "standby": 3200, "resume": 3600, "expected": ["resume", "save"]},
+    {"name": "no chemistry uses LiPo range", "chemistry": null, "cells": 1, "save": 3500, "recovery": 3300, "standby": 3200, "resume": 3600, "expected": []},
+    {"name": "everything upside down", "chemistry": "LIPO", "cells": 1, "save": 3200, "recovery": 3300, "standby": 3500, "resume": 3300, "expected": ["recovery", "resume", "standby"]},
+    {"name": "2S gap is pack mV", "chemistry": "LIPO", "cells": 2, "save": 7000, "recovery": 6600, "standby": 6551, "resume": 7200, "expected": ["standby"]}
+  ],
+  "intervals": [
+    {"kind": "LORAWAN_STATION", "seconds": 30, "ok": true},
+    {"kind": "LORAWAN_STATION", "seconds": 29, "ok": false},
+    {"kind": "LORAWAN_STATION", "seconds": 3600, "ok": true},
+    {"kind": "LORAWAN_STATION", "seconds": 3601, "ok": false},
+    {"kind": "HYDRONODE_FIRMWARE", "seconds": 10, "ok": true},
+    {"kind": "HYDRONODE_FIRMWARE", "seconds": 9, "ok": false},
+    {"kind": "HYDRONODE_LIBRARY", "seconds": 604800, "ok": true},
+    {"kind": "HYDRONODE_LIBRARY", "seconds": 604801, "ok": false}
+  ]
+}

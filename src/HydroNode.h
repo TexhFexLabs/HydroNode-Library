@@ -19,6 +19,8 @@
 #include <ArduinoHttpClient.h>
 #include <WiFiUdp.h>
 #include "HydroNodeCerts.h"
+#include "HydroNodeDeviceConfig.h"
+#include "HydroNodeBatteryGuard.h"
 
 /** One measurement for HydroNode::sendValues(): sensor type (e.g. "TEMPERATURE") and value. */
 struct HydroNodeValue {
@@ -54,7 +56,7 @@ struct HydroNodeValue {
 class HydroNode {
 public:
     /** Library version, sent as `hydronode-lib/<version>` unless setFirmwareIdentity() says otherwise. */
-    static constexpr const char* LIB_VERSION = "1.7.1";
+    static constexpr const char* LIB_VERSION = "1.8.0";
 
     // Error codes returned by sendValue() (positive values are HTTP status codes).
     static constexpr int ERR_WIFI_DISCONNECTED = -1;  // WiFi not connected
@@ -198,7 +200,7 @@ public:
     // --- Fleet and OTA hooks (1.6.0) ---------------------------------------------------------
     //
     // Every request carries two headers the HydroNode fleet view reads:
-    //   X-Firmware:      hydronode-lib/1.7.1 esp32c3
+    //   X-Firmware:      hydronode-lib/1.8.0 esp32c3
     //   X-Device-Status: boot=12;reset=poweron;uptime=45;rssi=-61;net=wifi;readErr=
     // A sketch built on the library needs nothing for that. The universal HydroNode firmware uses
     // the rest of this block for updates over the air.
@@ -215,7 +217,8 @@ public:
 
     /**
      * The X-Device-Status value: boot counter (cold starts only), reset reason, uptime in seconds,
-     * WiFi RSSI, network and the drivers that failed to read since clearReadErrors().
+     * WiFi RSSI, network, the battery state from setPowerState() (pwr=) and the drivers that
+     * failed to read since clearReadErrors().
      */
     String deviceStatusHeader();
 
@@ -269,6 +272,44 @@ public:
      */
     DownloadResult downloadSigned(const char* pathAndQuery, size_t offset, ChunkHandler onChunk);
 
+    // --- Device settings (1.8.0) -----------------------------------------------------------
+    //
+    // Send interval and battery thresholds the board runs. HydroNode shows them in the sensor
+    // settings ("On the device") and can send changed values back:
+    //   X-Device-Config: v=1 rev=7 int=300 save=3500 rec=3300 sby=3200 res=3600 src=bat cells=1 pwr=normal
+    // goes out with the first request after boot, after setDeviceConfig() with other values and
+    // after onSettings() took or refused a change. See examples/PowerThresholds.
+
+    /**
+     * The values this board runs. Strings are copied. Sent with the next request when they
+     * differ from the last ones (always with the first request after boot).
+     */
+    void setDeviceConfig(const HydroNodeDeviceConfig& config);
+
+    /** The values last set or taken from HydroNode. */
+    const HydroNodeDeviceConfig& deviceConfig() const { return config_; }
+
+    /**
+     * Battery state: normal, save, recovery or standby (HydroNodeBatteryGuard::stateName()).
+     * Goes out as pwr= in X-Device-Status with every request and in X-Device-Config.
+     * nullptr leaves it out.
+     */
+    void setPowerState(const char* state);
+
+    /**
+     * Lets HydroNode change the values above: the answer key "settings" arrives as
+     * HydroNodeSettings (pack mV, values it leaves out keep the current ones). Return true when the
+     * board took them (store them, e.g. in Preferences): the library keeps them with their
+     * revision and reports them with the next request. Return false to refuse; HydroNode shows
+     * the change as failed. Settings that break the rules (interval 10 to 604800 s, gaps
+     * between the thresholds) are refused before the callback. One revision runs once.
+     * Registering a callback adds caps=settings to X-Device-Config.
+     */
+    void onSettings(std::function<bool(const HydroNodeSettings&)> handler);
+
+    /** The X-Device-Config value the next request would carry. */
+    String deviceConfigHeader() const;
+
     /** Chip family as the backend knows it: esp32, esp32s2, esp32s3, esp32c3, esp32c6, esp8266. */
     static const char* family();
 
@@ -297,6 +338,17 @@ private:
     std::vector<String> readErrors_;
     std::vector<std::pair<String, String>> extraHeaders_;
     std::map<String, std::function<void(JsonVariantConst)>> responseHandlers_;
+    HydroNodeDeviceConfig config_;
+    String configSource_;
+    String configGauge_;
+    String powerState_;
+    bool configSet_ = false;
+    bool configDue_ = true;          // send X-Device-Config with the next request
+    bool configInFlight_ = false;    // the request being sent carries it
+    int32_t rejectedRevision_ = -1;  // rej= with the next X-Device-Config
+    const char* rejectError_ = nullptr;
+    int32_t lastSettingsRevision_ = -1;
+    std::function<bool(const HydroNodeSettings&)> settingsHandler_;
     uint32_t bootCount_ = 0;
     bool bootCounted_ = false;
     size_t jsonBufferSize_ = 8192;
@@ -344,6 +396,8 @@ private:
     bool parseResponse(const String& response, JsonDocument& doc);
     void handleResponse(JsonDocument& doc);
     void handleCommands(JsonArray commands);
+    void handleSettings(JsonVariantConst settings);
+    void deviceHeadersDelivered();
     void addHandler(const String& key, ValueType type, std::function<void(JsonVariant)> fn);
     const char* pickHandler(const String& key, const char* wireType, JsonVariant value, const Handler*& out) const;
     static const char* typeName(ValueType type);

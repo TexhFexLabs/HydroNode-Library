@@ -6,6 +6,11 @@
 # Datatypes (KEYWORD1)
 #######################################
 HydroNode	KEYWORD1
+HydroNodeValue	KEYWORD1
+HydroNodeDeviceConfig	KEYWORD1
+HydroNodeSettings	KEYWORD1
+HydroNodeThresholds	KEYWORD1
+HydroNodeBatteryGuard	KEYWORD1
 
 #######################################
 # Methods and Functions (KEYWORD2)
@@ -40,6 +45,27 @@ onResponseKey	KEYWORD2
 sendOtaAck	KEYWORD2
 downloadSigned	KEYWORD2
 family	KEYWORD2
+sendValues	KEYWORD2
+setTimeResyncInterval	KEYWORD2
+setDeviceConfig	KEYWORD2
+deviceConfig	KEYWORD2
+setPowerState	KEYWORD2
+onSettings	KEYWORD2
+deviceConfigHeader	KEYWORD2
+setThresholds	KEYWORD2
+thresholds	KEYWORD2
+update	KEYWORD2
+state	KEYWORD2
+changed	KEYWORD2
+radioAllowed	KEYWORD2
+intervalFactor	KEYWORD2
+sleepSeconds	KEYWORD2
+stateName	KEYWORD2
+memory	KEYWORD2
+restore	KEYWORD2
+reset	KEYWORD2
+defaults	KEYWORD2
+validate	KEYWORD2
 
 #######################################
 # Constants (LITERAL1)
