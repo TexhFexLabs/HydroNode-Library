@@ -6,6 +6,35 @@ All notable changes to HydroNode-Library are documented here. The format follows
 
 ## [Unreleased]
 
+## [1.8.0] - 2026-10-09
+
+### Added
+
+- `setDeviceConfig(config)` reports the send interval and the four battery thresholds the board
+  runs (pack mV), plus power source, gauge, cells and capacity, as
+  `X-Device-Config: v=1 rev=7 int=300 save=3500 rec=3300 sby=3200 res=3600 src=bat cells=1 pwr=normal`.
+  Sent with the first request after boot, after a change and after a refusal. HydroNode shows the
+  values in the sensor settings under "On the device".
+- `HydroNodeDeviceConfig.error` reports a problem of the board itself as `err=`, e.g.
+  `no_measurement` when thresholds are set but nothing measures the battery.
+- `onSettings(callback)` takes changed values from HydroNode (answer key `settings`). Return
+  `true` to keep them: the library reports them with their revision (`rev=`). Return `false` to
+  refuse (`rej=`). Values that break the rules (interval 10 to 604800 s, gaps between the
+  thresholds) are refused before the callback with `err=invalid`. One revision runs once; an
+  offer of the same revision only reports the outcome again. Adds `caps=settings`.
+- `setPowerState(state)`: `pwr=normal|save|recovery|standby` in `X-Device-Status` and
+  `X-Device-Config`. HydroNode shows "Low battery standby" instead of "Offline" for a board that
+  reported `recovery` or `standby` before going quiet.
+- `HydroNodeBatteryGuard`: the battery state machine of the HydroNode station for your own sketch
+  (NORMAL, SAVE, RECOVERY, STANDBY; Save exit at save + 150 mV, resume after 2 readings 60 s
+  apart, invalid readings never lead to standby, 3 invalid ones turn the radio off). Plain C++
+  with a `Memory` struct for RTC memory, presets per chemistry and `validate()` with the same
+  rules HydroNode uses. The universal HydroNode firmware uses the same class.
+- Example `PowerThresholds`: battery on an ADC divider, guard, deep sleep, settings kept in
+  Preferences (ESP32) or EEPROM (ESP8266).
+- Native tests in `extras/test` (`python3 extras/test/run_tests.py`), including the shared
+  threshold rule table.
+
 ## [1.7.1] - 2026-10-07
 
 ### Changed

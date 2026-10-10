@@ -43,6 +43,7 @@ hydro.sendValue("TEMPERATURE", 21.5);
 - **One request per reading** — `sendValues()` sends all values of a reading together, with the time they were measured. Saves a round trip per value.
 - **Honest error reporting** — `sendValue()` returns the HTTP status code or a descriptive error code, so your firmware can retry intelligently.
 - **Lightweight** — no background tasks, no heap surprises, RAM-friendly.
+- **Battery thresholds** — `HydroNodeBatteryGuard` saves power below Save, turns WiFi off below Recovery and sleeps deep below Standby, like the HydroNode station. Interval and thresholds show up in HydroNode and can be changed there (`onSettings()`).
 - **Shows up in the fleet view** — since 1.6.0 every request says which firmware runs and how the board is doing (boot counter, reset reason, signal). Hooks for updates over the air are built in.
 
 **Board support: ESP32 (all variants) and ESP8266 (4 MB flash recommended).** TLS uses `WiFiClientSecure` with the bundled root certificates: mbedTLS on ESP32, BearSSL on ESP8266. The ESP8266 has little RAM for TLS; keep the rest of the sketch lean.
@@ -109,6 +110,7 @@ All examples are complete sketches — open them via *File → Examples → Hydr
 | **WiFiManagerSetup** | No hardcoded WiFi: captive portal (`HydroNode-Setup-XXXX`) for end-user WiFi configuration. |
 | **ExternalWiFi** | You own the WiFi lifecycle (custom reconnect logic); full error handling for every `sendValue()` result. |
 | **ActuatorControl** | Backend commands drive a pump and a fan via callbacks, with a safety limit for the pump run time. |
+| **PowerThresholds** | Battery on an ADC divider, `HydroNodeBatteryGuard`, deep sleep. Interval and thresholds come from HydroNode and survive a power cut. |
 
 ## Choosing a WiFi strategy
 
@@ -237,7 +239,7 @@ A declined command is never run. Commands without a type (sent by older app vers
 Every request now carries two headers for the HydroNode fleet view. A sketch needs nothing for that:
 
 ```
-X-Firmware: hydronode-lib/1.7.1 esp32c3
+X-Firmware: hydronode-lib/1.8.0 esp32c3
 X-Device-Status: boot=12;reset=poweron;uptime=45;rssi=-61;net=wifi;readErr=
 ```
 
@@ -245,7 +247,7 @@ X-Device-Status: boot=12;reset=poweron;uptime=45;rssi=-61;net=wifi;readErr=
 
 | Method | Purpose |
 |---|---|
-| `setFirmwareIdentity(product, version, flags)` | Replaces `hydronode-lib/1.7.1`. The universal firmware sends `hydronode/0.5.0 esp32c3 ota cfg=14`. The chip family is always added |
+| `setFirmwareIdentity(product, version, flags)` | Replaces `hydronode-lib/1.8.0`. The universal firmware sends `hydronode/0.5.0 esp32c3 ota cfg=14`. The chip family is always added |
 | `reportReadError("bme280")` / `clearReadErrors()` | Drivers that failed to read this round, sent as `readErr=bme280` |
 | `setResetReason("ota")` | Reports this reset reason instead of the chip's own (nullptr: the chip's again) |
 | `setExtraHeader(name, value)` / `clearExtraHeader(name)` | A header on every request until cleared, e.g. `X-Ota-State` |
@@ -267,6 +269,56 @@ hydro.onResponseKey("ota", [](JsonVariantConst offer) {
 A GET has no body, so its signature covers the path with query and the timestamp: `X-Signature` = Base64(HMAC-SHA256(`/api/device-ota/v1/image?job=…` + timestamp)). The `Range` header is not signed.
 
 A sketch built on the library appears in the HydroNode fleet view as **own sketch**, with its health, restarts, signal and read errors. HydroNode updates only its universal firmware over the air (flashed with the device builder); the hooks above are the building blocks if a sketch wants its own update path. How the universal firmware uses them, including the offer format, verification and rollback, is described in [hydronode-firmware/docs/OTA.md](https://github.com/TexhFexLabs/hydronode-firmware/blob/main/docs/OTA.md). Changes per version: [CHANGELOG.md](CHANGELOG.md).
+
+### Device settings and battery thresholds (1.8.0)
+
+A battery board can report what it runs and take changes from the sensor settings in HydroNode
+("On the device"): the send interval and four thresholds in pack millivolts (volts per cell × cells).
+
+| Threshold | Below it the board ... |
+|---|---|
+| Save | sends half as often. Back to normal at Save + 0.15 V |
+| Recovery | turns WiFi and outputs off and only checks the battery. Also after 3 failed readings |
+| Standby | sleeps as deep as it can and wakes once an hour (2 valid readings in Recovery) |
+| Resume | runs again at or above it: 2 valid readings at least 60 s apart |
+
+Rules (pack mV): Standby + 50 ≤ Recovery, Recovery + 50 ≤ Save, Recovery + 100 ≤ Resume ≤ Save + 400.
+LiPo preset per cell: 3.50 / 3.30 / 3.20 / 3.60 V.
+
+```cpp
+HydroNodeBatteryGuard guard;          // LiPo, one cell
+
+HydroNodeDeviceConfig config;
+config.intervalSeconds = 300;
+config.saveMv = 3500; config.recoveryMv = 3300; config.standbyMv = 3200; config.resumeMv = 3600;
+config.source = "bat";                // usb, bat or solar
+config.gauge = "adc";                 // or max17048, ina226, ...
+config.cells = 1;
+config.powerState = guard.stateName();
+config.revision = storedRevision;     // 0 until HydroNode sent values
+hydro.setDeviceConfig(config);
+
+hydro.onSettings([](const HydroNodeSettings& s) {
+  store(s);                           // e.g. Preferences, so a power cut keeps them
+  guard.setThresholds({s.saveMv, s.recoveryMv, s.standbyMv, s.resumeMv});
+  return true;                        // false refuses, HydroNode shows it as failed
+});
+
+guard.update(batteryMv, readingOk, secondsIncludingSleep);
+if (guard.radioAllowed()) sendRound();
+sleep(guard.sleepSeconds(interval));  // interval, 2x in SAVE, 60 s in RECOVERY, 1 h in STANDBY
+```
+
+| Method | Purpose |
+|---|---|
+| `setDeviceConfig(config)` | Values the board runs, sent as `X-Device-Config` with the first request after boot and after a change |
+| `setPowerState("save")` | `pwr=` in `X-Device-Status`, so HydroNode can tell a low battery from a dead board |
+| `onSettings(fn)` | Takes changes from HydroNode (answer key `settings`). Adds `caps=settings`; without it the values are read only in HydroNode |
+| `HydroNodeBatteryGuard` | `update(mv, valid, nowSeconds)`, `state()`, `changed()`, `radioAllowed()`, `sleepSeconds(interval)`, `memory()`/`restore()` for RTC memory, `defaults(chemistry, cells)`, `validate(...)` |
+
+Send one last round when the guard leaves NORMAL/SAVE (`changed()`), so HydroNode shows
+"Low battery standby" instead of "Offline". The guard never sleeps or switches pins itself;
+the `PowerThresholds` example shows the whole loop.
 
 ### Tuning
 

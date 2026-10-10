@@ -276,7 +276,9 @@ String HydroNode::deviceStatusHeader() {
     value += resetOverride_.length() > 0 ? resetOverride_ : String(chipResetReason());
     value += ";uptime=" + String(millis() / 1000UL);
     if (WiFi.status() == WL_CONNECTED) value += ";rssi=" + String(WiFi.RSSI());
-    value += ";net=wifi;readErr=";
+    value += ";net=wifi";
+    if (powerState_.length() > 0) value += ";pwr=" + powerState_;
+    value += ";readErr=";
     bool first = true;
     for (const String& id : readErrors_) {
         if (value.length() + id.length() + 1 > MAX_STATUS_HEADER) break;
@@ -321,12 +323,72 @@ void HydroNode::onResponseKey(const char* key, std::function<void(JsonVariantCon
     responseHandlers_[String(key)] = handler;
 }
 
+/** Same reported values; the power state travels on its own. */
+static bool sameText(const char* a, const char* b) {
+    return strcmp(a ? a : "", b ? b : "") == 0;
+}
+
+void HydroNode::setDeviceConfig(const HydroNodeDeviceConfig& config) {
+    bool same = configSet_ && config_.intervalSeconds == config.intervalSeconds && config_.saveMv == config.saveMv &&
+                config_.recoveryMv == config.recoveryMv && config_.standbyMv == config.standbyMv &&
+                config_.resumeMv == config.resumeMv && config_.cells == config.cells &&
+                config_.capacityMah == config.capacityMah && config_.revision == config.revision &&
+                sameText(config_.source, config.source) && sameText(config_.gauge, config.gauge) &&
+                sameText(config_.error, config.error);
+    configSource_ = config.source ? config.source : "";
+    configGauge_ = config.gauge ? config.gauge : "";
+    configError_ = config.error ? config.error : "";
+    config_ = config;
+    config_.source = configSource_.length() > 0 ? configSource_.c_str() : nullptr;
+    config_.gauge = configGauge_.length() > 0 ? configGauge_.c_str() : nullptr;
+    config_.error = configError_.length() > 0 ? configError_.c_str() : nullptr;
+    if (config.powerState) powerState_ = headerSafe(config.powerState, false);
+    config_.powerState = powerState_.length() > 0 ? powerState_.c_str() : nullptr;
+    configSet_ = true;
+    if (!same) configDue_ = true;
+}
+
+void HydroNode::setPowerState(const char* state) {
+    powerState_ = state ? headerSafe(state, false) : String();
+    config_.powerState = powerState_.length() > 0 ? powerState_.c_str() : nullptr;
+}
+
+void HydroNode::onSettings(std::function<bool(const HydroNodeSettings&)> handler) {
+    settingsHandler_ = handler;
+    configDue_ = true;  // caps=settings has to reach HydroNode
+}
+
+String HydroNode::deviceConfigHeader() const {
+    if (!configSet_ && !settingsHandler_) return String();
+    char buffer[hydronode::DEVICE_CONFIG_MAX + 1];
+    hydronode::formatDeviceConfig(buffer, sizeof(buffer), config_, static_cast<bool>(settingsHandler_),
+                                  rejectedRevision_, rejectError_);
+    return String(buffer);
+}
+
 void HydroNode::sendDeviceHeaders() {
     http_.sendHeader("X-Firmware", firmwareHeader().c_str());
     http_.sendHeader("X-Device-Status", deviceStatusHeader().c_str());
+    configInFlight_ = false;
+    if (configDue_) {
+        String config = deviceConfigHeader();
+        if (config.length() > 0) {
+            http_.sendHeader("X-Device-Config", config.c_str());
+            configInFlight_ = true;
+        }
+    }
     for (const auto& header : extraHeaders_) {
         http_.sendHeader(header.first.c_str(), header.second.c_str());
     }
+}
+
+/** HydroNode answered with 2xx: the X-Device-Config of that request arrived. */
+void HydroNode::deviceHeadersDelivered() {
+    if (!configInFlight_) return;
+    configInFlight_ = false;
+    configDue_ = false;
+    rejectedRevision_ = -1;
+    rejectError_ = nullptr;
 }
 
 bool HydroNode::sendOtaAck(const char* job, const char* result, const char* reason) {
@@ -397,6 +459,7 @@ HydroNode::DownloadResult HydroNode::downloadSigned(const char* pathAndQuery, si
             return result;
         }
         result.status = status;
+        if (status >= 200 && status < 300) deviceHeadersDelivered();
 
         long rangeTotal = -1;
         while (http_.headerAvailable()) {
@@ -792,6 +855,10 @@ void HydroNode::handleResponse(JsonDocument& doc) {
         handleCommands(commands);
     }
 
+    // Settings before the further keys: an update may restart the board.
+    JsonVariantConst settings = doc["settings"];
+    if (!settings.isNull()) handleSettings(settings);
+
     // Further keys (ota, config, ...) after the commands: an update may restart the board.
     for (const auto& entry : responseHandlers_) {
         JsonVariantConst value = doc[entry.first];
@@ -800,6 +867,62 @@ void HydroNode::handleResponse(JsonDocument& doc) {
             entry.second(value);
         }
     }
+}
+
+/**
+ * Answer key "settings" (only for boards with onSettings()):
+ *   {"rev":8,"int":300,"save":3500,"rec":3300,"sby":3200,"res":3600,"mah":2000}
+ * The outcome goes out as X-Device-Config with the next request: the new values and rev=8,
+ * or the old ones and rej=8.
+ */
+void HydroNode::handleSettings(JsonVariantConst value) {
+    if (!settingsHandler_ || !value.is<JsonObjectConst>()) return;
+    JsonVariantConst rev = value["rev"];
+    if (!rev.is<uint16_t>()) {
+        dbg("settings: no revision, ignored");
+        return;
+    }
+    int32_t revision = rev.as<uint16_t>();
+    if (revision == lastSettingsRevision_) {
+        // Offered again: the last report did not arrive. Report the outcome once more.
+        configDue_ = true;
+        return;
+    }
+    lastSettingsRevision_ = revision;
+
+    HydroNodeSettings settings;
+    settings.revision = static_cast<uint16_t>(revision);
+    settings.intervalSeconds = value["int"] | config_.intervalSeconds;
+    settings.saveMv = value["save"] | config_.saveMv;
+    settings.recoveryMv = value["rec"] | config_.recoveryMv;
+    settings.standbyMv = value["sby"] | config_.standbyMv;
+    settings.resumeMv = value["res"] | config_.resumeMv;
+    settings.capacityMah = value["mah"] | config_.capacityMah;
+
+    configDue_ = true;
+    if (!hydronode::settingsValid(settings)) {
+        dbg("settings: revision " + String(revision) + " breaks the rules, refused");
+        rejectedRevision_ = revision;
+        rejectError_ = "invalid";
+        return;
+    }
+    if (!settingsHandler_(settings)) {
+        dbg("settings: revision " + String(revision) + " refused by the sketch");
+        rejectedRevision_ = revision;
+        rejectError_ = nullptr;
+        return;
+    }
+    dbg("settings: revision " + String(revision) + " taken");
+    config_.revision = settings.revision;
+    config_.intervalSeconds = settings.intervalSeconds;
+    config_.saveMv = settings.saveMv;
+    config_.recoveryMv = settings.recoveryMv;
+    config_.standbyMv = settings.standbyMv;
+    config_.resumeMv = settings.resumeMv;
+    config_.capacityMah = settings.capacityMah;
+    configSet_ = true;
+    rejectedRevision_ = -1;
+    rejectError_ = nullptr;
 }
 
 void HydroNode::handleCommands(JsonArray commands) {
@@ -975,6 +1098,7 @@ int HydroNode::postSigned(const char* path, const String& payload, unsigned long
             if (reused) continue;
             return statusCode;
         }
+        if (statusCode >= 200 && statusCode < 300) deviceHeadersDelivered();
         responseOut = http_.responseBody();
         return statusCode;
     }
