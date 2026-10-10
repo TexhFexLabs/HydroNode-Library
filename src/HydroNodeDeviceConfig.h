@@ -52,7 +52,8 @@ constexpr uint32_t INTERVAL_MAX_S = 604800;
 /**
  * Writes the X-Device-Config value into `out` (NUL-terminated, at most DEVICE_CONFIG_MAX
  * characters; a key that does not fit is left out whole). `rejectedRevision` >= 0 adds
- * rej=<rev>, `error` adds err=<reason> (else config.error). Text values keep only a-z, 0-9 and _. Returns the length.
+ * rej=<rev> with err=<error> when given; without a refusal err=<config.error>. Text values keep
+ * only a-z, 0-9 and _. Returns the length.
  */
 size_t formatDeviceConfig(char* out, size_t size, const HydroNodeDeviceConfig& config, bool acceptsSettings,
                           int32_t rejectedRevision = -1, const char* error = nullptr);

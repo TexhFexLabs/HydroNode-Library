@@ -64,7 +64,9 @@ size_t formatDeviceConfig(char* out, size_t size, const HydroNodeDeviceConfig& c
     appendToken(out, size, length, "pwr", c.powerState);
     if (acceptsSettings) append(out, size, length, "caps=settings");
     if (rejectedRevision >= 0) appendNumber(out, size, length, "rej", static_cast<uint32_t>(rejectedRevision));
-    appendToken(out, size, length, "err", error ? error : c.error);
+    // A refusal carries its own reason (or none, when the sketch said no); the board's error
+    // (no_measurement) would read as the reason for the refusal.
+    appendToken(out, size, length, "err", rejectedRevision >= 0 ? error : c.error);
     return length;
 }
 

@@ -257,6 +257,8 @@ static void deviceConfigHeader() {
     noMeasurement.error = "no_measurement";
     CHECK_STR(format(noMeasurement, false).c_str(), "v=1 rev=0 src=bat err=no_measurement");
     CHECK_STR(format(noMeasurement, false, 3, "invalid").c_str(), "v=1 rev=0 src=bat rej=3 err=invalid");
+    // The sketch said no (onSettings returned false): no reason, never the board's error.
+    CHECK_STR(format(noMeasurement, false, 3).c_str(), "v=1 rev=0 src=bat rej=3");
 
     HydroNodeDeviceConfig usb;
     usb.intervalSeconds = 60;
