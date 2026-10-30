@@ -22,9 +22,9 @@ done
 
 # board | examples
 MATRIX=(
-  "esp32:esp32:esp32|QuickStart ExternalWiFi WiFiManagerSetup ActuatorControl PowerThresholds Transport_WiFi Ethernet_ESP32 Ethernet_W5500 Cellular_SendNow Cellular_ModemTLS WiFi_Fallback_LTE Board_AnyClient_Template"
+  "esp32:esp32:esp32|QuickStart ExternalWiFi WiFiManagerSetup ActuatorControl PowerThresholds Transport_WiFi Ethernet_ESP32 Ethernet_W5500 Cellular_SendNow Cellular_ModemTLS WiFi_Fallback_LTE Board_AnyClient_Template Cellular_CollectHourly Buffer_OfflineSafe Buffer_DeepSleep"
   "esp32:esp32:esp32c3|QuickStart Transport_WiFi"
-  "esp8266:esp8266:nodemcuv2|QuickStart ActuatorControl PowerThresholds Transport_WiFi Board_AnyClient_Template"
+  "esp8266:esp8266:nodemcuv2|QuickStart ActuatorControl PowerThresholds Transport_WiFi Board_AnyClient_Template Buffer_OfflineSafe Buffer_DeepSleep"
   "arduino:samd:mkrwifi1010|Board_MKR_WiFi1010 Board_AnyClient_Template"
 )
 

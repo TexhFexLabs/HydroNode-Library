@@ -26,6 +26,10 @@ static constexpr size_t MAX_READ_ERRORS = 16;
 static constexpr uint32_t RTC_BOOT_SLOT = 126;
 static constexpr uint32_t RTC_BOOT_MAGIC = 0x484E4254;  // "HNBT"
 
+// A round older than this goes through the buffer instead of the live endpoint, whose signed
+// timestamp has to be within 2 minutes of the server clock.
+static constexpr uint32_t LIVE_MAX_AGE_MS = 90000;
+
 /** Drops characters that would end a header line or a field of it. */
 static String headerSafe(const String& value, bool allowSpaces) {
     String out;
@@ -58,8 +62,10 @@ static constexpr uint32_t SYNC_RETRY_MS = 60000;
 // clock: the Unix ms of the last sync and the millis() it was taken at.
 #if defined(ESP32)
 static RTC_DATA_ATTR int64_t lastSyncS = 0;
+static RTC_DATA_ATTR uint16_t runTagValue = 0;
 #else
 static int64_t lastSyncS = 0;
+static uint16_t runTagValue = 0;
 #endif
 #if !defined(HYDRONODE_SYSTEM_CLOCK)
 static uint64_t clockBaseMs = 0;
@@ -591,10 +597,27 @@ uint64_t HydroNodeClient::epochMs() const {
 #endif
 }
 
-/** Sets the clock. */
+/** The board clock while it is not set: what a round stored before the first sync is dated with. */
+uint32_t HydroNodeClient::unsyncedNow() const {
+#if defined(HYDRONODE_SYSTEM_CLOCK)
+    return (uint32_t)time(nullptr);
+#else
+    return millis() / 1000UL;
+#endif
+}
+
+/** Tells this run of the board from the last one, so unsynced rounds of a past run are not misdated. */
+uint16_t HydroNodeClient::runTag() {
+    while (runTagValue == 0) runTagValue = (uint16_t)randomWord();
+    return runTagValue;
+}
+
+/** Sets the clock; rounds stored before the first sync of this run get their real time. */
 bool HydroNodeClient::setClockMs(uint64_t unixMs, const char* source) {
     if (unixMs < uint64_t(MIN_VALID_EPOCH) * 1000ULL) return false;
+    bool wasValid = epochMs() != 0;
     int64_t before = (int64_t)epochMs();
+    int64_t unsyncedBefore = (int64_t)unsyncedNow();
 #if defined(HYDRONODE_SYSTEM_CLOCK)
     struct timeval tv;
     tv.tv_sec = (time_t)(unixMs / 1000ULL);
@@ -608,6 +631,10 @@ bool HydroNodeClient::setClockMs(uint64_t unixMs, const char* source) {
     syncFailed_ = false;
     String drift = before > 0 ? ", clock was off by " + String((long)((int64_t)unixMs - before)) + " ms" : String();
     dbg("time: synced via " + String(source) + drift);
+    if (buffer_ && shiftHook_ && !wasValid) {
+        size_t moved = shiftHook_(*buffer_, runTag(), (int64_t)(unixMs / 1000ULL) - unsyncedBefore);
+        if (moved) dbg("buffer: dated " + String((unsigned)moved) + " rounds measured before the time sync");
+    }
     return true;
 }
 
@@ -737,6 +764,39 @@ uint32_t HydroNodeClient::measuredAt(uint32_t ageMs) const {
 
 // --- Sending ---------------------------------------------------------------------------------
 
+/** 5xx, 429, no network, no time, no connection: worth trying again later. */
+bool HydroNodeClient::keepForLater(int status) {
+    return status == ERR_NETWORK_DOWN || status == ERR_TIME_NOT_SYNCED || status == ERR_CONNECTION_FAILED ||
+           status == 429 || status >= 500;
+}
+
+bool HydroNodeClient::storeRound(const HydroNodeValue* values, const size_t* index, size_t count, uint32_t ageMs) {
+    if (!buffer_ || count == 0) return false;
+    HydroNodeValue picked[HydroNodeBuffer::MAX_VALUES_PER_ROUND];
+    size_t n = 0;
+    for (size_t k = 0; k < count && n < HydroNodeBuffer::MAX_VALUES_PER_ROUND; k++) {
+        picked[n++] = values[index ? index[k] : k];
+    }
+    bool stored;
+    if (epochMs() != 0) {
+        stored = buffer_->add(measuredAt(ageMs), picked, n, true, runTag());
+    } else {
+        uint32_t now = unsyncedNow(), age = ageMs / 1000UL;
+        stored = buffer_->add(age < now ? now - age : 0, picked, n, false, runTag());
+    }
+    if (stored) {
+        dbg("buffer: stored a round of " + String((unsigned)n) + " values (" + String((unsigned)buffer_->rounds()) +
+            " rounds, " + String(buffer_->fillPercent()) + " % full)");
+    }
+    return stored;
+}
+
+/** Flushes the stored rounds after a request that went through. */
+void HydroNodeClient::afterSend(int status) {
+    if (status < 200 || status >= 300 || !buffer_ || !flushHook_ || !flushAfterSend_ || flushing_) return;
+    flushHook_(*this);
+}
+
 int HydroNodeClient::sendValue(const char* type, float value) {
     // Checked before any network work: the backend rejects both with 400,
     // so sending them would only cost a TLS handshake.
@@ -748,15 +808,21 @@ int HydroNodeClient::sendValue(const char* type, float value) {
         dbg("sendValue: value is NaN or infinite, check the sensor reading");
         return ERR_INVALID_VALUE;
     }
+    HydroNodeValue one{type, value};
+    auto keep = [&](int code) {
+        if (storeHook_ && storeOnFailure_ && keepForLater(code) && storeHook_(*this, &one, nullptr, 1, 0)) return ERR_STORED;
+        return code;
+    };
+
     if (!transport_.isUp()) {
         dbg("sendValue: network down");
-        return ERR_NETWORK_DOWN;
+        return keep(ERR_NETWORK_DOWN);
     }
 
     uint32_t epoch = 0;
     if (!ensureTimeSynced(epoch)) {
         dbg("sendValue: time not synced, aborting (backend would reject the signature)");
-        return ERR_TIME_NOT_SYNCED;
+        return keep(ERR_TIME_NOT_SYNCED);
     }
 
     String payload;
@@ -770,7 +836,7 @@ int HydroNodeClient::sendValue(const char* type, float value) {
     }
     if (statusCode <= 0) {
         dbg("sendValue: transport error " + String(statusCode));
-        return ERR_CONNECTION_FAILED;
+        return keep(ERR_CONNECTION_FAILED);
     }
 
     dbg("sendValue: " + String(type) + "=" + String(value, 2) + " -> HTTP " + String(statusCode));
@@ -779,6 +845,8 @@ int HydroNodeClient::sendValue(const char* type, float value) {
     if (statusCode == 202 && parseResponse(response, doc)) {
         handleResponse(doc);
     }
+    if (keepForLater(statusCode)) return keep(statusCode);
+    afterSend(statusCode);
     return statusCode;
 }
 
@@ -821,15 +889,28 @@ int HydroNodeClient::sendValues(const HydroNodeValue* values, size_t count, int*
         }
         return code;
     };
+    // A round that cannot go now waits in the buffer (when there is one).
+    auto keep = [&](int code) {
+        if (storeHook_ && storeOnFailure_ && keepForLater(code) && storeHook_(*this, values, sent.data(), sent.size(), ageMs)) {
+            return fail(ERR_STORED);
+        }
+        return fail(code);
+    };
     if (!transport_.isUp()) {
         dbg("sendValues: network down");
-        return fail(ERR_NETWORK_DOWN);
+        return keep(ERR_NETWORK_DOWN);
+    }
+    // Too old for the live endpoint: it goes the buffered way, which keeps the measuring time.
+    if (storeHook_ && ageMs > LIVE_MAX_AGE_MS) {
+        if (!storeHook_(*this, values, sent.data(), sent.size(), ageMs)) return fail(ERR_INVALID_VALUE);
+        int status = flushHook_(*this);
+        return fail(status == 0 ? ERR_STORED : status);
     }
     if (batchUnsupported_) return sendEach(values, sent, codes);
     uint32_t epoch = 0;
     if (!ensureTimeSynced(epoch)) {
         dbg("sendValues: time not synced, aborting (backend would reject the signature)");
-        return fail(ERR_TIME_NOT_SYNCED);
+        return keep(ERR_TIME_NOT_SYNCED);
     }
 
     epoch = measuredAt(ageMs);
@@ -850,9 +931,10 @@ int HydroNodeClient::sendValues(const HydroNodeValue* values, size_t count, int*
     }
     if (statusCode <= 0) {
         dbg("sendValues: transport error " + String(statusCode));
-        return fail(ERR_CONNECTION_FAILED);
+        return keep(ERR_CONNECTION_FAILED);
     }
     dbg("sendValues: " + String((unsigned)sent.size()) + " values -> HTTP " + String(statusCode));
+    if (keepForLater(statusCode)) return keep(statusCode);
 
     // Every value shares the request's status, except the ones the answer lists as rejected.
     fail(statusCode);
@@ -868,7 +950,195 @@ int HydroNodeClient::sendValues(const HydroNodeValue* values, size_t count, int*
         }
         if (statusCode >= 200 && statusCode < 300) handleResponse(doc);
     }
+    afterSend(statusCode);
     return statusCode;
+}
+
+// --- Buffer ----------------------------------------------------------------------------------
+
+void HydroNodeClient::attachBuffer(HydroNodeBuffer& buffer) {
+    buffer_ = &buffer;
+    storeHook_ = [](HydroNodeClient& c, const HydroNodeValue* v, const size_t* i, size_t n, uint32_t age) {
+        return c.storeRound(v, i, n, age);
+    };
+    flushHook_ = [](HydroNodeClient& c) { return c.buffer_->empty() ? 0 : c.flush(); };
+    shiftHook_ = [](HydroNodeBuffer& b, uint16_t tag, int64_t delta) { return b.shiftUnsynced(tag, delta); };
+    // Rounds a past run stored before its clock was set cannot be dated any more.
+    size_t stale = buffer_->dropStaleUnsynced(runTag());
+    if (stale) dbg("buffer: dropped " + String((unsigned)stale) + " undated rounds of an earlier run");
+}
+
+void HydroNodeClient::setRoundsPerRequest(size_t rounds) {
+    if (rounds < 1) rounds = 1;
+    roundsPerRequest_ = rounds > MAX_ROUNDS_PER_REQUEST ? MAX_ROUNDS_PER_REQUEST : rounds;
+}
+
+int HydroNodeClient::record(const HydroNodeValue* values, size_t count, uint32_t ageMs) {
+    if (!buffer_) return ERR_NO_BUFFER;
+    if (!values || count == 0) return ERR_INVALID_VALUE;
+    if (!storeRound(values, nullptr, count > HydroNodeBuffer::MAX_VALUES_PER_ROUND ? HydroNodeBuffer::MAX_VALUES_PER_ROUND : count, ageMs)) {
+        return ERR_INVALID_VALUE;
+    }
+    HydroNodeBuffer::Round last;
+    return buffer_->round(buffer_->rounds() - 1, last) ? last.count : 0;
+}
+
+bool HydroNodeClient::flushDue(size_t minRounds, uint32_t maxAgeSeconds) const {
+    if (!buffer_ || buffer_->empty()) return false;
+    if (minRounds > 0 && buffer_->rounds() >= minRounds) return true;
+    if (maxAgeSeconds == 0) return false;
+    HydroNodeBuffer::Round oldest;
+    uint64_t now = epochMs();
+    if (now == 0 || !buffer_->round(0, oldest) || !oldest.synced) return false;
+    return now / 1000ULL >= uint64_t(oldest.time) + maxAgeSeconds;
+}
+
+int HydroNodeClient::flush(size_t maxRequests) {
+    if (!buffer_) return ERR_NO_BUFFER;
+    if (buffer_->empty()) return 0;
+    if (!transport_.isUp()) {
+        dbg("flush: network down, " + String((unsigned)buffer_->rounds()) + " rounds wait");
+        return ERR_NETWORK_DOWN;
+    }
+    uint32_t epoch = 0;
+    if (!ensureTimeSynced(epoch)) {
+        dbg("flush: time not synced");
+        return ERR_TIME_NOT_SYNCED;
+    }
+    buffer_->dropStaleUnsynced(runTag());
+    flushing_ = true;
+    int status = 0;
+    size_t requests = 0;
+    while (!buffer_->empty() && (maxRequests == 0 || requests < maxRequests)) {
+        size_t done = 0;
+        status = flushOnce(done);
+        requests++;
+        if (status < 200 || status >= 300 || done == 0) break;
+    }
+    flushing_ = false;
+    return status;
+}
+
+/**
+ * One request to /api/webhook/sensor-rounds with the oldest stored rounds:
+ *
+ *   {"sensorId":"<id>","timestamp":<sent>,"rounds":[
+ *     {"timestamp":<measured>,"signature":"<round signature>","values":[{"type":"T","value":21.50}]}]}
+ *
+ * Every round carries its own signature (the one-round payload with its measuring time), the
+ * request is signed over the list of these signatures with the time it is sent. `done` gets the
+ * number of rounds that left the buffer.
+ */
+int HydroNodeClient::flushOnce(size_t& done) {
+    done = 0;
+    size_t total = buffer_->rounds();
+    size_t chunk = 0, valueCount = 0;
+    HydroNodeBuffer::Round r;
+    while (chunk < total && chunk < roundsPerRequest_ && buffer_->round(chunk, r)) {
+        if (!r.synced) break;  // measured before the clock was set and not dated yet
+        if (chunk > 0 && valueCount + r.count > MAX_VALUES_PER_ROUNDS_REQUEST) break;
+        valueCount += r.count;
+        chunk++;
+    }
+    if (chunk == 0) {
+        if (buffer_->round(0, r) && !r.synced) {
+            dbg("flush: dropping a round that could not be dated");
+            buffer_->remove(0);
+            done = 1;
+            return 202;
+        }
+        return 0;
+    }
+
+    std::vector<String> signatures(chunk);
+    String body;
+    body.reserve(64 + chunk * 80 + valueCount * 36);
+    HydroNodeValue values[HydroNodeBuffer::MAX_VALUES_PER_ROUND];
+    for (size_t i = 0; i < chunk; i++) {
+        buffer_->round(i, r);
+        for (size_t k = 0; k < r.count; k++) HydroNodeBuffer::value(r, k, values[k]);
+        String canonical;
+        hydronode::appendRoundPayload(canonical, sensorId_, r.time, values, nullptr, r.count);
+        char signature[hydronode::SIGNATURE_SIZE];
+        canonical += String(r.time);
+        if (!sign(canonical, signature)) return ERR_CONNECTION_FAILED;
+        signatures[i] = signature;
+        if (i) body += ',';
+        body += "{\"timestamp\":";
+        hydronode::appendNumber(body, r.time);
+        body += ",\"signature\":\"";
+        body += signature;
+        body += "\",\"values\":[";
+        for (size_t k = 0; k < r.count; k++) {
+            if (k) body += ',';
+            body += "{\"type\":\"";
+            body += values[k].type;
+            body += "\",\"value\":";
+            hydronode::appendValue(body, values[k].value);
+            body += '}';
+        }
+        body += "]}";
+    }
+    std::vector<const char*> list(chunk);
+    for (size_t i = 0; i < chunk; i++) list[i] = signatures[i].c_str();
+
+    String response;
+    int status = 0;
+    for (int attempt = 0; attempt < 2; attempt++) {
+        uint32_t sentAt = 0;
+        if (!ensureTimeSynced(sentAt)) return ERR_TIME_NOT_SYNCED;
+        String request;
+        request.reserve(body.length() + 72);
+        request += "{\"sensorId\":\"";
+        request += sensorId_;
+        request += "\",\"timestamp\":";
+        hydronode::appendNumber(request, sentAt);
+        request += ",\"rounds\":[";
+        request += body;
+        request += "]}";
+        String envelope;
+        hydronode::appendRoundsEnvelope(envelope, sensorId_, sentAt, list.data(), chunk);
+        envelope += String(sentAt);
+        char signature[hydronode::SIGNATURE_SIZE];
+        if (!sign(envelope, signature)) return ERR_CONNECTION_FAILED;
+        status = postWithSignature(roundsPath_, request, sentAt, signature, response);
+        if (attempt == 0 && resyncAfterRejection(status, response)) continue;
+        break;
+    }
+    dbg("flush: " + String((unsigned)chunk) + " rounds, " + String((unsigned)valueCount) + " values -> HTTP " +
+        String(status));
+
+    if (status <= 0) return ERR_CONNECTION_FAILED;
+    if (status == 404 || status == 405) {
+        dbg("flush: this HydroNode server does not take stored rounds yet, they stay in the buffer");
+        return status;
+    }
+    if (status == 400) {
+        // The request itself is broken; sending it again cannot help.
+        dbg("flush: HydroNode refused the rounds (" + response + "), dropping them");
+        buffer_->removeFirst(chunk);
+        done = chunk;
+        return status;
+    }
+    if (status < 200 || status >= 300) return status;  // 401, 403, 429, 5xx: keep everything
+
+    JsonDocument doc;
+    std::vector<bool> retry(chunk, false);
+    bool parsed = parseResponse(response, doc);
+    if (parsed) {
+        for (JsonVariantConst index : doc["retry"].as<JsonArrayConst>()) {
+            int i = index | -1;
+            if (i >= 0 && (size_t)i < chunk) retry[i] = true;
+        }
+    }
+    for (size_t i = chunk; i-- > 0;) {
+        if (retry[i]) continue;
+        buffer_->remove(i);
+        done++;
+    }
+    if (done < chunk) dbg("flush: " + String((unsigned)(chunk - done)) + " rounds stay for a later try");
+    if (parsed) handleResponse(doc);
+    return status;
 }
 
 /** Parses a JSON answer; plain-text answers (errors) and empty ones are no document. */

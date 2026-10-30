@@ -11,7 +11,7 @@ All notable changes to HydroNode-Library are documented here. The format follows
 ### Added
 
 - Any network: `HydroNodeClient(transport, sensorId, secretKey)` runs the whole HydroNode protocol
-  (values, commands, settings, fleet headers, OTA hooks) over a `HydroNodeTransport`.
+  (values, stored rounds, commands, settings, fleet headers, OTA hooks) over a `HydroNodeTransport`.
   Transports in the library:
   - `HydroNodeWiFi` (ESP32/ESP8266 WiFi, what `HydroNode` uses),
   - `HydroNodeEsp32Ethernet` (built-in Ethernet: WT32-ETH01, Olimex ESP32-POE),
@@ -28,6 +28,18 @@ All notable changes to HydroNode-Library are documented here. The format follows
 - `ERR_NETWORK_DOWN` (same value as `ERR_WIFI_DISCONNECTED`, which stays).
 - `X-Device-Status` reports the transport: `net=wifi|eth|lte-m|nb-iot|lte|2g|cellular` and its
   signal in `rssi=`.
+- `HydroNodeBuffer`: keeps measurement rounds in memory you give it (RAM, ESP32 RTC memory, or
+  flash via `data()`/`size()`), checked by magic, checksum and structure on `begin()`. Full:
+  `DROP_OLDEST` or `DROP_NEWEST`. Plain C++, natively tested.
+- `attachBuffer(buffer)`: `sendValue()`/`sendValues()` store a round they could not send (no
+  network, no time, connection error, 429, 5xx) and return `ERR_STORED`; after the next success
+  the stored rounds follow. `record()` stores without sending, `flush()` sends the stored rounds to
+  `POST /api/webhook/sensor-rounds` (each round with its measuring time and its own signature,
+  up to 7 days back, stored once even when sent twice), `flushDue(minRounds, maxAgeSeconds)`
+  decides when. Rounds stored before the first time sync are dated once the clock is set.
+  Without `attachBuffer()` none of this is linked into the sketch.
+- Examples `Cellular_CollectHourly` (measure every 6 min, send once an hour), `Buffer_OfflineSafe`
+  and `Buffer_DeepSleep`.
 - Examples `Transport_WiFi`, `Ethernet_ESP32`, `Ethernet_W5500`, `Cellular_SendNow`,
   `Cellular_ModemTLS`, `WiFi_Fallback_LTE`, `Board_MKR_WiFi1010`, `Board_AnyClient_Template`.
 - Native tests of the wire contract (`extras/test/test_protocol.cpp`): value formatting, payloads

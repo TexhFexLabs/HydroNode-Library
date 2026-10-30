@@ -42,6 +42,8 @@ hydro.sendValue("TEMPERATURE", 21.5);
 - **Typed backend commands** — switch a lamp, run a pump or write a calibration value from the HydroNode app. Each command has a value type (`BOOL`, `INT32`, `UINT32`, `INT64`, `UINT64`, `STRING`) that must match your callback. The app shows every command as *Confirmed* or *Declined* with the reason.
 - **Any network** — WiFi, Ethernet (built-in or W5500), LTE-M, NB-IoT, LTE Cat-1 or anything that offers an Arduino `Client`. The signature does not care how the bytes travel; you pick a transport, the rest of the sketch stays the same. Only what you include is compiled: a WiFi sketch carries no modem code.
 - **WiFi fallback to LTE** — `HydroNodeFailover` uses WiFi while it is up and switches to the modem when it is not.
+- **Never lose a reading** — attach a `HydroNodeBuffer` and readings that could not be sent wait (in RAM, RTC memory or flash) and go out later with the time they were measured.
+- **Send less often** — `record()` stores a reading without radio, `flush()` sends many in one request: a cellular board measures every 5 minutes and sends once an hour.
 - **WiFi your way** — use the built-in `connectWiFi()` helper, a WiFiManager captive portal, or your own connection management. The library never touches WiFi unless you ask it to.
 - **One request per reading** — `sendValues()` sends all values of a reading together, with the time they were measured. Saves a round trip per value.
 - **Honest error reporting** — `sendValue()` returns the HTTP status code or a descriptive error code, so your firmware can retry intelligently.
@@ -125,6 +127,9 @@ All examples are complete sketches — open them via *File → Examples → Hydr
 | **WiFi_Fallback_LTE** | WiFi first, LTE-M when WiFi is gone, back to WiFi when it returns. |
 | **Board_MKR_WiFi1010** | A board that is no ESP (SAMD21 + NINA): the pattern for UNO R4 WiFi, Pico W, MKR NB 1500. |
 | **Board_AnyClient_Template** | Fill-in template for any board and network: four questions, done. |
+| **Cellular_CollectHourly** | LTE-M on a battery: measure every 6 minutes, send the 10 readings once an hour, deep sleep in between. |
+| **Buffer_OfflineSafe** | WiFi as usual, but readings wait in a buffer (saved to flash) while the network is down. |
+| **Buffer_DeepSleep** | WiFi battery sensor: measure every 5 minutes, WiFi only every 30 minutes. ESP32 and ESP8266. |
 
 ## Choosing a network
 
@@ -193,6 +198,7 @@ Sends one signed measurement. Returns the HTTP status code, or a negative error:
 | `ERR_CONNECTION_FAILED` (−3) | TLS/TCP/transport error | Retry with backoff |
 | `ERR_INVALID_TYPE` (−4) | `type` is not upper case letters, digits and `_` | Use e.g. `TEMPERATURE`, not `temperature`. Nothing was sent |
 | `ERR_INVALID_VALUE` (−5) | `value` is NaN or infinite | Usually a failed sensor read. Nothing was sent |
+| `ERR_STORED` (−7) | Not sent, kept in the attached buffer | Nothing: it goes out with the next successful send or `flush()` |
 | `400` | Request rejected as malformed | Enable `setDebug(Serial)`; should not happen with valid input |
 | `401` | Bad signature or timestamp | Check sensor ID + secret key |
 | `429` | Rate limited | One value per sensor **and type** every 10 s. Slow down |
@@ -213,6 +219,49 @@ int status = hydro.sendValues(v, 2, codes);
 ```
 
 Returns the HTTP status (`202` when at least one value was accepted) or a negative error as for `sendValue()`. `codes` gets the result per value: `202`, the status the backend gave that value (`429` rate limited, `400` invalid, `503`), or `ERR_INVALID_TYPE` / `ERR_INVALID_VALUE` for a value the library skipped without sending. Each type may appear once per call, at most 64 values. Commands arrive in the answer as with `sendValue()`. Against a backend without the batch endpoint the library falls back to one `sendValue()` per value.
+
+### Buffer: store now, send later (1.9.0)
+
+A `HydroNodeBuffer` keeps rounds until they reach HydroNode. It lives in memory you give it, so
+you decide where it survives: plain RAM, ESP32 RTC memory (deep sleep) or flash (power cut, save
+`data()`/`size()` yourself).
+
+```cpp
+RTC_DATA_ATTR uint8_t mem[4096];              // survives deep sleep on the ESP32
+HydroNodeBuffer buffer(mem, sizeof(mem));
+
+void setup() {
+  buffer.begin();                             // keeps what was stored before the sleep
+  hydro.attachBuffer(buffer);
+}
+
+// A: never lose a value. sendValues() stores what it could not send (returns ERR_STORED)
+//    and sends the stored rounds after the next success.
+hydro.sendValues(v, 2);
+
+// B: send less often. Store without radio, send many in one request.
+hydro.record(v, 2);
+if (hydro.flushDue(10, 3600)) hydro.flush();  // 10 rounds stored, or the oldest is 1 h old
+```
+
+| Method | Purpose |
+|---|---|
+| `HydroNodeBuffer(memory, size, whenFull)` | `DROP_OLDEST` (default: newest data wins) or `DROP_NEWEST` |
+| `buffer.begin()` | Checks the memory (magic, checksum, structure); keeps intact rounds, else starts empty |
+| `attachBuffer(buffer)` | Use it for `record()`, `flush()` and failed sends |
+| `record(values, count, ageMs)` | Store one round, no network. Works before the first time sync: the round is dated once the clock is set |
+| `flush(maxRequests)` | Send the stored rounds, oldest first, `setRoundsPerRequest()` per request (default 12). Rounds the server took or refused for good leave the buffer, rounds it could not take now (429, 503) stay. Returns the last HTTP status, 0 when empty |
+| `flushDue(minRounds, maxAgeSeconds)` | True when enough rounds are stored or the oldest is old enough |
+| `setStoreOnFailure(bool)` / `setFlushAfterSend(bool)` | Turn the automatic parts of A off (default on) |
+| `buffer.rounds()`, `fillPercent()`, `dropped()`, `oldestTime()`, `clear()` | State for logs and decisions |
+
+A round with two values (`TEMPERATURE`, `HUMIDITY`) takes 39 bytes: 2 KB hold about 50 rounds.
+Stored rounds go to `POST /api/webhook/sensor-rounds`: each keeps its measuring time (up to
+7 days back) and its own signature, and a round sent twice is stored once. HydroNode learns the
+sending rhythm from the deliveries, so a board that sends once an hour is not reported as delayed.
+`sendValues(..., ageMs)` with an `ageMs` over 90 s takes this way on its own when a buffer is attached.
+
+Code: `ERR_STORED` (−7) not sent but kept, `ERR_NO_BUFFER` (−6) `record()`/`flush()` without a buffer.
 
 ### `void closeConnection()`
 

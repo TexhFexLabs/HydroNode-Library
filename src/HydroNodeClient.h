@@ -15,6 +15,9 @@
 //
 // `HydroNode` (HydroNode.h) is this class with the ESP32/ESP8266 WiFi transport built in, the API
 // every sketch before 1.9.0 uses. Both stay supported.
+//
+// With a HydroNodeBuffer attached, rounds that could not be sent are kept and sent later with the
+// time they were measured, and record() + flush() send many rounds in one request.
 #if defined(__AVR__)
 #error "HydroNode-Library needs a 32-bit board with TLS (ESP32, ESP8266, RP2040, SAMD, nRF52, STM32, Renesas ...)."
 #endif
@@ -28,6 +31,7 @@
 #include <ArduinoHttpClient.h>
 #include "HydroNodeTransport.h"
 #include "HydroNodeProtocol.h"
+#include "HydroNodeBuffer.h"
 #include "HydroNodeDeviceConfig.h"
 #include "HydroNodeBatteryGuard.h"
 
@@ -43,9 +47,15 @@ public:
     static constexpr int ERR_CONNECTION_FAILED = -3;  // TLS/TCP connection or HTTP transport error
     static constexpr int ERR_INVALID_TYPE      = -4;  // type is not A-Z, 0-9, _ starting with a letter
     static constexpr int ERR_INVALID_VALUE     = -5;  // value is NaN or infinite
+    static constexpr int ERR_NO_BUFFER         = -6;  // record()/flush() without attachBuffer()
+    static constexpr int ERR_STORED            = -7;  // not sent, but kept in the buffer for later
 
     /** Most values sendValues() puts into one request; further ones are skipped (ERR_INVALID_VALUE). */
     static constexpr size_t MAX_VALUES_PER_REQUEST = 64;
+
+    /** Most rounds and values flush() puts into one request (the server limits). */
+    static constexpr size_t MAX_ROUNDS_PER_REQUEST = 100;
+    static constexpr size_t MAX_VALUES_PER_ROUNDS_REQUEST = 512;
 
     /**
      * @param transport How the board reaches the internet. Must live as long as the client.
@@ -80,7 +90,8 @@ public:
      * @return HTTP status code (202 = accepted) or a negative ERR_* code.
      *
      * Note: the backend accepts one value per sensor and type every 10 seconds.
-     * Different types may be sent right after each other.
+     * Different types may be sent right after each other. With a buffer attached, a value that
+     * could not be sent is stored (ERR_STORED) and goes out with the next flush.
      */
     int sendValue(const char* type, float value);
 
@@ -98,8 +109,65 @@ public:
      * Each type may appear once (later duplicates: ERR_INVALID_TYPE), at most MAX_VALUES_PER_REQUEST
      * values per call. Commands and other answer keys arrive as with sendValue(). A backend older
      * than the batch endpoint gets one sendValue() per value instead (signed with the current time).
+     *
+     * With a buffer attached (attachBuffer()): a round that could not be sent (no network, no time,
+     * connection or server error) is stored and the call returns ERR_STORED; after a successful
+     * send the stored rounds follow (setFlushAfterSend()).
      */
     int sendValues(const HydroNodeValue* values, size_t count, int* codes = nullptr, uint32_t ageMs = 0);
+
+    // --- Buffer: store now, send later (1.9.0) ------------------------------------------------
+    //
+    //   static uint8_t mem[2048];
+    //   HydroNodeBuffer buffer(mem, sizeof(mem));
+    //   hydro.attachBuffer(buffer);
+    //
+    //   hydro.record(v, 2);                     // store only, no radio
+    //   if (buffer.rounds() >= 10) hydro.flush();  // one request for all of them
+    //
+    // See examples/Cellular_CollectHourly and examples/Buffer_DeepSleep.
+
+    /** Uses `buffer` for record(), flush() and failed sends. nullptr detaches. */
+    void attachBuffer(HydroNodeBuffer& buffer);
+    void detachBuffer() {
+        buffer_ = nullptr;
+        storeHook_ = nullptr;
+        flushHook_ = nullptr;
+        shiftHook_ = nullptr;
+    }
+    HydroNodeBuffer* buffer() { return buffer_; }
+
+    /**
+     * Stores one round measured `ageMs` ago without sending it. Uses no network. Returns the
+     * number of values stored, ERR_NO_BUFFER without a buffer, or ERR_INVALID_VALUE when the buffer
+     * took nothing (no valid value, or full with DROP_NEWEST). Works before the first time sync:
+     * the round is dated once the clock is set (in the same run of the board).
+     */
+    int record(const HydroNodeValue* values, size_t count, uint32_t ageMs = 0);
+
+    /**
+     * Sends the stored rounds, oldest first, up to setRoundsPerRequest() per request, until the
+     * buffer is empty, a request fails or `maxRequests` requests went out (0 = no limit).
+     * Rounds the server stored or refused for good are removed; rounds it could not take now
+     * (429, 503) stay. Returns the status of the last request (202 = all sent), 0 when there was
+     * nothing to send, or a negative ERR_*.
+     */
+    int flush(size_t maxRequests = 0);
+
+    /**
+     * True when it is time to flush: at least `minRounds` stored, or the oldest round is
+     * `maxAgeSeconds` old or older (0 = ignore). Needs a valid clock for the age.
+     */
+    bool flushDue(size_t minRounds, uint32_t maxAgeSeconds = 0) const;
+
+    /** Rounds per request in flush() (default 12, at most MAX_ROUNDS_PER_REQUEST). */
+    void setRoundsPerRequest(size_t rounds);
+
+    /** sendValue()/sendValues() store a round they could not send (default true with a buffer). */
+    void setStoreOnFailure(bool store) { storeOnFailure_ = store; }
+
+    /** After a successful sendValue()/sendValues(), flush the stored rounds (default true). */
+    void setFlushAfterSend(bool flush) { flushAfterSend_ = flush; }
 
     /**
      * Command callbacks. Register one per command name and value type; the
@@ -110,7 +178,7 @@ public:
      *   hydro.onUInt32("lamp", [](uint32_t ms) { pulse(LAMP_PIN, ms); });
      *   hydro.onUInt32("co2_calibration", [](uint32_t v) { sensor.calibrate(v); });
      *
-     * Commands arrive in the response of sendValue() and sendValues(). Before any callback
+     * Commands arrive in the response of sendValue(), sendValues() and flush(). Before any callback
      * runs, the library answers the backend (signed): commands with a
      * matching callback are confirmed, all others are declined with a reason
      * (NO_HANDLER, TYPE_MISMATCH, INVALID_VALUE) that the app shows.
@@ -329,6 +397,7 @@ private:
     const char* path_;
     uint16_t port_;
     const char* batchPath_ = "/api/webhook/sensor-values";
+    const char* roundsPath_ = "/api/webhook/sensor-rounds";
     const char* ackPath_ = "/api/webhook/sensor-command-ack";
     const char* otaAckPath_ = "/api/webhook/sensor-ota-ack";
     String product_ = "hydronode-lib";
@@ -362,6 +431,16 @@ private:
     Client* httpOn_ = nullptr;
     bool batchUnsupported_ = false;  // the backend answered the batch path with 404/405
 
+    HydroNodeBuffer* buffer_ = nullptr;
+    // Set by attachBuffer() only: a sketch without a buffer never references the buffer code,
+    // so the linker leaves it out (a WiFi-only sketch stays as small as before 1.9.0).
+    bool (*storeHook_)(HydroNodeClient&, const HydroNodeValue*, const size_t*, size_t, uint32_t) = nullptr;
+    int (*flushHook_)(HydroNodeClient&) = nullptr;
+    size_t (*shiftHook_)(HydroNodeBuffer&, uint16_t, int64_t) = nullptr;
+    size_t roundsPerRequest_ = 12;
+    bool storeOnFailure_ = true;
+    bool flushAfterSend_ = true;
+    bool flushing_ = false;
 
     enum class ValueType : uint8_t { ANY, BOOL, INT32, UINT32, INT64, UINT64, STRING };
 
@@ -403,4 +482,10 @@ private:
     static const char* typeName(ValueType type);
     static const char* checkCommand(const Handler& handler, const char* wireType, JsonVariant value);
     bool sendAck(JsonArrayConst accepted, JsonArrayConst declined);
+    void afterSend(int status);
+    bool storeRound(const HydroNodeValue* values, const size_t* index, size_t count, uint32_t ageMs);
+    int flushOnce(size_t& sentRounds);
+    static bool keepForLater(int status);
+    uint32_t unsyncedNow() const;
+    static uint16_t runTag();
 };

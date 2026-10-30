@@ -5,6 +5,7 @@ test_main.cpp       HydroNodeBatteryGuard and the X-Device-Config format, plus t
                     rules against vectors/threshold-rules-vectors.json, the same table the backend,
                     web, firmware and station test against (copy of
                     hydronode-backend/src/test/resources/devicesettings/threshold-rules-vectors.json).
+test_buffer.cpp     HydroNodeBuffer: storing, reading, full memory, persistence, dating rounds.
 test_protocol.cpp   The wire contract: value formatting, canonical payloads, HMAC-SHA256 (portable
                     implementation). Random input is checked against Python's hmac/hashlib and
                     against the backend's formatting rule (Java "%.2f": half up on the exact float).
@@ -137,7 +138,10 @@ def main() -> int:
         protocol = Path(tmp) / "test_protocol"
         build(protocol, [str(HERE / "test_protocol.cpp"), str(SRC / "HydroNodeProtocol.cpp"),
                          str(SRC / "HydroNodeCrypto.cpp")])
-        results = [subprocess.run([str(guard)]).returncode, subprocess.run([str(protocol)]).returncode]
+        buffer = Path(tmp) / "test_buffer"
+        build(buffer, [str(HERE / "test_buffer.cpp"), str(SRC / "HydroNodeBuffer.cpp"),
+                       str(SRC / "HydroNodeProtocol.cpp")])
+        results = [subprocess.run([str(binary)]).returncode for binary in (guard, protocol, buffer)]
         failed = check_vectors(guard) + check_protocol(protocol)
     return 0 if not any(results) and failed == 0 else 1
 
