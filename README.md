@@ -433,6 +433,7 @@ the `PowerThresholds` example shows the whole loop.
 
 ## Security model
 
+- **One contract, tested everywhere**: the native tests check the library against the shared signature vectors of [hydronode-sdk](https://github.com/TexhFexLabs/hydronode-sdk) (`extras/test/vectors/signature-vectors.json`), the same file the HydroNode backend tests itself against.
 - **Authentication**: every request (values, command and update ACKs) carries `X-Signature` = Base64(HMAC-SHA256(payload + timestamp)) computed with your secret key; a signed download signs its path and query instead of a body. The key never leaves the device.
 - **Command delivery**: the backend hands out queued commands only in responses to correctly signed value submissions — an attacker who knows your sensor ID cannot fetch them.
 - **Replay protection**: `X-Timestamp` must be within ±2 minutes of server time. The library keeps the clock synced via NTP and refuses to transmit with an unsynced clock (`ERR_TIME_NOT_SYNCED`) instead of sending a doomed request.
@@ -468,6 +469,7 @@ For development or trial setups, contact **support@hydronode.tech**.
 - [Getting started with Arduino/ESP32](https://hydronode.tech/docs/guide/arduino/) — step-by-step guide for this library
 - [LoRaWAN integration](https://hydronode.tech/docs/guide/lorawan/) — battery-powered sensors without WiFi
 - [Home Assistant integration](https://github.com/TexhFexLabs/hydronode-homeassistant) — your HydroNode sensors as native HA entities (HACS)
+- [HydroNode SDK](https://github.com/TexhFexLabs/hydronode-sdk) — the same protocol for Python, MicroPython, JavaScript, Go and shell, plus the full protocol description and the shared signature test vectors
 
 ## Guides
 

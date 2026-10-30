@@ -8,7 +8,9 @@ test_main.cpp       HydroNodeBatteryGuard and the X-Device-Config format, plus t
 test_buffer.cpp     HydroNodeBuffer: storing, reading, full memory, persistence, dating rounds.
 test_protocol.cpp   The wire contract: value formatting, canonical payloads, HMAC-SHA256 (portable
                     implementation). Random input is checked against Python's hmac/hashlib and
-                    against the backend's formatting rule (Java "%.2f": half up on the exact float).
+                    against the backend's formatting rule (Java "%.2f": half up on the exact float),
+                    and the shared signature table vectors/signature-vectors.json (copy of
+                    hydronode-sdk/vectors/signature-vectors.json, also checked by the backend).
 """
 
 from __future__ import annotations
@@ -130,6 +132,60 @@ def check_vectors(binary: Path) -> int:
     return failed
 
 
+SIGNATURE_VECTORS = HERE / "vectors" / "signature-vectors.json"
+
+
+def f32bits(value: float) -> str:
+    return f"{struct.unpack('<I', struct.pack('<f', value))[0]:08x}"
+
+
+def check_signature_vectors(binary: Path) -> int:
+    """The shared table of hydronode-sdk (copy in vectors/): the backend checks the same file."""
+    doc = json.loads(SIGNATURE_VECTORS.read_text())
+    sensor, secret = doc["sensorId"], doc["secret"].encode()
+    failed = 0
+
+    got = run_lines(binary, "format", [v["float32"][2:] for v in doc["values"]])
+    for v, text in zip(doc["values"], got):
+        if text != v["text"]:
+            failed += 1
+            print(f'vector value {v["input"]}: expected {v["text"]}, got {text}')
+
+    got = run_lines(binary, "payload", [f'{sensor} {c["type"]} {f32bits(c["value"])} {c["timestamp"]}' for c in doc["single"]])
+    expected_messages = []
+    for c, text in zip(doc["single"], got):
+        if text != c["canonical"]:
+            failed += 1
+            print(f'vector single "{c["name"]}": {text}')
+        expected_messages.append((text + str(c["timestamp"]), c["signature"]))
+
+    rounds = list(doc["round"]) + [r for case in doc["rounds"] for r in case["rounds"]]
+    lines = [f'{sensor} {c["timestamp"]} {len(c["values"])} ' + " ".join(f'{v["type"]} {f32bits(v["value"])}' for v in c["values"]) for c in rounds]
+    for c, text in zip(rounds, run_lines(binary, "round", lines)):
+        if text != c["canonical"]:
+            failed += 1
+            print(f'vector round at {c["timestamp"]}: {text}')
+        expected_messages.append((text + str(c["timestamp"]), c["signature"]))
+
+    lines = [f'{sensor} {c["sent"]} {len(c["rounds"])} ' + " ".join(r["signature"] for r in c["rounds"]) for c in doc["rounds"]]
+    for c, text in zip(doc["rounds"], run_lines(binary, "envelope", lines)):
+        if text != c["envelope"]:
+            failed += 1
+            print(f'vector envelope "{c["name"]}": {text}')
+        expected_messages.append((text + str(c["sent"]), c["signature"]))
+
+    for c in doc["raw"]:
+        expected_messages.append((c["payload"] + str(c["timestamp"]), c["signature"]))
+    got = run_lines(binary, "sign", [f"{secret.hex()} {m.encode().hex()}" for m, _ in expected_messages])
+    for (message, signature), text in zip(expected_messages, got):
+        if text != signature:
+            failed += 1
+            print(f"vector signature of {message[:60]}...: expected {signature}, got {text}")
+    total = len(doc["values"]) + len(expected_messages)
+    print(f"{total} shared signature vectors, {failed} failed")
+    return failed
+
+
 def main() -> int:
     with tempfile.TemporaryDirectory() as tmp:
         guard = Path(tmp) / "test_main"
@@ -142,7 +198,7 @@ def main() -> int:
         build(buffer, [str(HERE / "test_buffer.cpp"), str(SRC / "HydroNodeBuffer.cpp"),
                        str(SRC / "HydroNodeProtocol.cpp")])
         results = [subprocess.run([str(binary)]).returncode for binary in (guard, protocol, buffer)]
-        failed = check_vectors(guard) + check_protocol(protocol)
+        failed = check_vectors(guard) + check_protocol(protocol) + check_signature_vectors(protocol)
     return 0 if not any(results) and failed == 0 else 1
 
 

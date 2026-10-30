@@ -43,7 +43,8 @@ All notable changes to HydroNode-Library are documented here. The format follows
 - Examples `Transport_WiFi`, `Ethernet_ESP32`, `Ethernet_W5500`, `Cellular_SendNow`,
   `Cellular_ModemTLS`, `WiFi_Fallback_LTE`, `Board_MKR_WiFi1010`, `Board_AnyClient_Template`.
 - Native tests of the wire contract (`extras/test/test_protocol.cpp`): value formatting, payloads
-  and HMAC against Python's hmac and the backend's formatting rule.
+  and HMAC against Python's hmac and the backend's formatting rule, and against the shared
+  signature vectors of hydronode-sdk (`extras/test/vectors/signature-vectors.json`).
   `extras/test/compile_examples.sh` compiles every example for its boards.
 
 ### Changed

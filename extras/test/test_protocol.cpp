@@ -6,6 +6,8 @@
 //   test_protocol format     "<float bits as hex>" per line -> formatted value
 //   test_protocol sign       "<key hex> <message hex>" per line -> Base64 HMAC-SHA256
 //   test_protocol payload    "<sensorId> <TYPE> <float bits hex> <timestamp>" -> one-value payload
+//   test_protocol round      "<sensorId> <ts> <n> <TYPE> <bits> ..." -> one-round payload
+//   test_protocol envelope   "<sensorId> <sent> <n> <signature> ..." -> stored-rounds envelope
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -165,6 +167,43 @@ int main(int argc, char** argv) {
     }
     if (argc > 1 && strcmp(argv[1], "sign") == 0) {
         while (scanf("%4095s %4095s", a, b) == 2) printf("%s\n", sign(unhex(a), unhex(b)).c_str());
+        return 0;
+    }
+    if (argc > 1 && strcmp(argv[1], "round") == 0) {
+        // "<sensorId> <timestamp> <count> <TYPE> <bits> ..." -> one-round payload
+        unsigned long ts;
+        unsigned count;
+        while (scanf("%255s %lu %u", a, &ts, &count) == 3) {
+            std::vector<std::string> types(count);
+            std::vector<HydroNodeValue> values(count);
+            for (unsigned i = 0; i < count; i++) {
+                if (scanf("%255s %63s", b, c) != 2) return 1;
+                types[i] = b;
+                values[i].value = fromBits(c);
+            }
+            for (unsigned i = 0; i < count; i++) values[i].type = types[i].c_str();
+            std::string out;
+            hydronode::appendRoundPayload(out, a, uint32_t(ts), values.data(), nullptr, count);
+            printf("%s\n", out.c_str());
+        }
+        return 0;
+    }
+    if (argc > 1 && strcmp(argv[1], "envelope") == 0) {
+        // "<sensorId> <sent> <count> <sig> ..." -> stored-rounds envelope
+        unsigned long sent;
+        unsigned count;
+        while (scanf("%255s %lu %u", a, &sent, &count) == 3) {
+            std::vector<std::string> sigs(count);
+            std::vector<const char*> list(count);
+            for (unsigned i = 0; i < count; i++) {
+                if (scanf("%255s", b) != 1) return 1;
+                sigs[i] = b;
+            }
+            for (unsigned i = 0; i < count; i++) list[i] = sigs[i].c_str();
+            std::string out;
+            hydronode::appendRoundsEnvelope(out, a, uint32_t(sent), list.data(), count);
+            printf("%s\n", out.c_str());
+        }
         return 0;
     }
     if (argc > 1 && strcmp(argv[1], "payload") == 0) {
