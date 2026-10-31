@@ -11,6 +11,14 @@ HydroNodeDeviceConfig	KEYWORD1
 HydroNodeSettings	KEYWORD1
 HydroNodeThresholds	KEYWORD1
 HydroNodeBatteryGuard	KEYWORD1
+HydroNodeClient	KEYWORD1
+HydroNodeTransport	KEYWORD1
+HydroNodeWiFi	KEYWORD1
+HydroNodeEsp32Ethernet	KEYWORD1
+HydroNodeCellular	KEYWORD1
+HydroNodeClientTransport	KEYWORD1
+HydroNodeFailover	KEYWORD1
+HydroNodeBuffer	KEYWORD1
 
 #######################################
 # Methods and Functions (KEYWORD2)
@@ -58,6 +66,41 @@ update	KEYWORD2
 state	KEYWORD2
 changed	KEYWORD2
 radioAllowed	KEYWORD2
+transport	KEYWORD2
+setTimeProvider	KEYWORD2
+setTimeServers	KEYWORD2
+network	KEYWORD2
+isUp	KEYWORD2
+client	KEYWORD2
+udp	KEYWORD2
+networkTimeMs	KEYWORD2
+signalDbm	KEYWORD2
+beforeConnect	KEYWORD2
+setUdp	KEYWORD2
+onIsUp	KEYWORD2
+onNetworkTime	KEYWORD2
+onSignal	KEYWORD2
+onBeforeConnect	KEYWORD2
+setClient	KEYWORD2
+setNetwork	KEYWORD2
+setTimeServer	KEYWORD2
+active	KEYWORD2
+connect	KEYWORD2
+secureClient	KEYWORD2
+wifi	KEYWORD2
+attachBuffer	KEYWORD2
+detachBuffer	KEYWORD2
+record	KEYWORD2
+flush	KEYWORD2
+flushDue	KEYWORD2
+setRoundsPerRequest	KEYWORD2
+setStoreOnFailure	KEYWORD2
+setFlushAfterSend	KEYWORD2
+rounds	KEYWORD2
+fillPercent	KEYWORD2
+dropped	KEYWORD2
+oldestTime	KEYWORD2
+setWhenFull	KEYWORD2
 intervalFactor	KEYWORD2
 sleepSeconds	KEYWORD2
 stateName	KEYWORD2
@@ -76,3 +119,8 @@ ERR_CONNECTION_FAILED	LITERAL1
 ERR_INVALID_TYPE	LITERAL1
 ERR_INVALID_VALUE	LITERAL1
 LIB_VERSION	LITERAL1
+ERR_NETWORK_DOWN	LITERAL1
+ERR_STORED	LITERAL1
+ERR_NO_BUFFER	LITERAL1
+DROP_OLDEST	LITERAL1
+DROP_NEWEST	LITERAL1

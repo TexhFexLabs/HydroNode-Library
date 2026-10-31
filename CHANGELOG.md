@@ -6,6 +6,65 @@ All notable changes to HydroNode-Library are documented here. The format follows
 
 ## [Unreleased]
 
+## [1.9.0] - 2026-11-01
+
+### Added
+
+- Any network: `HydroNodeClient(transport, sensorId, secretKey)` runs the whole HydroNode protocol
+  (values, stored rounds, commands, settings, fleet headers, OTA hooks) over a `HydroNodeTransport`.
+  Transports in the library:
+  - `HydroNodeWiFi` (ESP32/ESP8266 WiFi, what `HydroNode` uses),
+  - `HydroNodeEsp32Ethernet` (built-in Ethernet: WT32-ETH01, Olimex ESP32-POE),
+  - `HydroNodeCellular<Modem>` for any TinyGSM modem (LTE-M, NB-IoT, Cat-1, 2G) with the modem
+    clock as time source and CSQ as signal,
+  - `HydroNodeClientTransport` for any Arduino `Client` that speaks TLS (W5500 + ESP_SSLClient,
+    WiFiNINA, UNO R4 WiFi, MKR NB 1500, Pico W ...),
+  - `HydroNodeFailover` (WiFi first, LTE when WiFi is gone).
+  Only included headers are compiled: a WiFi sketch carries no modem code.
+- Boards other than the ESP: RP2040, SAMD, nRF52, STM32, Renesas and mbed boards. HMAC-SHA256
+  uses a small built-in SHA-256 there; the clock runs on `millis()` from the last sync.
+- `setTimeProvider(fn)` (RTC chip, GPS) and `setTimeServers(a, b, c)`. Time sources are tried in
+  this order: provider, SNTP over the transport, the transport's network clock.
+- `ERR_NETWORK_DOWN` (same value as `ERR_WIFI_DISCONNECTED`, which stays).
+- `X-Device-Status` reports the transport: `net=wifi|eth|lte-m|nb-iot|lte|2g|cellular` and its
+  signal in `rssi=`.
+- `HydroNodeBuffer`: keeps measurement rounds in memory you give it (RAM, ESP32 RTC memory, or
+  flash via `data()`/`size()`), checked by magic, checksum and structure on `begin()`. Full:
+  `DROP_OLDEST` or `DROP_NEWEST`. Plain C++, natively tested.
+- `attachBuffer(buffer)`: `sendValue()`/`sendValues()` store a round they could not send (no
+  network, no time, connection error, 429, 5xx) and return `ERR_STORED`; after the next success
+  the stored rounds follow. `record()` stores without sending, `flush()` sends the stored rounds to
+  `POST /api/webhook/sensor-rounds` (each round with its measuring time and its own signature,
+  up to 7 days back, stored once even when sent twice), `flushDue(minRounds, maxAgeSeconds)`
+  decides when. Rounds stored before the first time sync are dated once the clock is set.
+  Without `attachBuffer()` none of this is linked into the sketch.
+- Examples `Cellular_CollectHourly` (measure every 6 min, send once an hour), `Buffer_OfflineSafe`
+  and `Buffer_DeepSleep`.
+- Examples `Transport_WiFi`, `Ethernet_ESP32`, `Ethernet_W5500`, `Cellular_SendNow`,
+  `Cellular_ModemTLS`, `WiFi_Fallback_LTE`, `Board_MKR_WiFi1010`, `Board_AnyClient_Template`.
+- Native tests of the wire contract (`extras/test/test_protocol.cpp`): value formatting, payloads
+  and HMAC against Python's hmac and the backend's formatting rule, and against the shared
+  signature vectors of hydronode-sdk (`extras/test/vectors/signature-vectors.json`).
+  `extras/test/compile_examples.sh` compiles every example for its boards.
+
+### Changed
+
+- `HydroNode` is now `HydroNodeClient` with the WiFi transport built in. Every sketch written for
+  1.x compiles and behaves as before; a WiFi-only sketch grows by about 2 KB.
+- Values are formatted by the library itself (half up on the exact float, like the backend),
+  instead of `String(value, 2)`. The text is the same for every value the backend accepted before;
+  `-0.0` now goes out as `-0.00`, which the backend reads back the same way.
+
+### Robustness of the buffer
+
+- A buffer kept in flash or RTC memory that a new sketch made smaller starts empty instead of
+  reading past its end.
+- When HydroNode refuses a block of stored rounds (HTTP 400), the next request carries half as many
+  until the broken round is found; only that one is dropped. Without memory for a request, fewer
+  rounds go next time and nothing is lost.
+- A round whose time cannot be set stays undated and is dropped on the next start instead of being
+  sent without a timestamp.
+
 ## [1.8.0] - 2026-10-09
 
 ### Added
