@@ -103,7 +103,10 @@ size_t HydroNodeBuffer::begin() {
         size_ = 0;  // too small to hold anything
         return 0;
     }
-    if (read32(AT_MAGIC) != MAGIC || read32(AT_CHECKSUM) != checksum() || !walk()) {
+    // The size check comes before the checksum: memory from an older sketch with a bigger
+    // buffer can claim more used bytes than this one holds, and the checksum would read past it.
+    if (read32(AT_MAGIC) != MAGIC || read32(AT_USED) > capacityBytes() ||
+        read32(AT_CHECKSUM) != checksum() || !walk()) {
         clear();
         return 0;
     }
@@ -246,9 +249,13 @@ size_t HydroNodeBuffer::shiftUnsynced(uint16_t runTag, int64_t deltaSeconds) {
     for (size_t i = 0; i < rounds(); i++) {
         if ((memory_[offset + R_FLAGS] & FLAG_UNSYNCED) && read16(offset + R_TAG) == runTag) {
             int64_t time = int64_t(read32(offset + R_TIME)) + deltaSeconds;
-            write32(offset + R_TIME, time > 0 && time <= 0xFFFFFFFFLL ? uint32_t(time) : 0);
-            memory_[offset + R_FLAGS] &= uint8_t(~FLAG_UNSYNCED);
-            changed++;
+            // A time that does not fit stays undated: flush() drops it instead of sending a
+            // round without a timestamp, which the server refuses together with its neighbours.
+            if (time > 0 && time <= 0xFFFFFFFFLL) {
+                write32(offset + R_TIME, uint32_t(time));
+                memory_[offset + R_FLAGS] &= uint8_t(~FLAG_UNSYNCED);
+                changed++;
+            }
         }
         offset += read16(offset + R_LENGTH);
     }

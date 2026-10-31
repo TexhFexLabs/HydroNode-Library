@@ -438,6 +438,7 @@ private:
     int (*flushHook_)(HydroNodeClient&) = nullptr;
     size_t (*shiftHook_)(HydroNodeBuffer&, uint16_t, int64_t) = nullptr;
     size_t roundsPerRequest_ = 12;
+    size_t flushLimit_ = 0;  // fewer rounds per request after a 400 or a lack of memory, 0 = none
     bool storeOnFailure_ = true;
     bool flushAfterSend_ = true;
     bool flushing_ = false;

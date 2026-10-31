@@ -149,6 +149,30 @@ static void roundsMeasuredBeforeTheTimeSyncGetDated() {
     CHECK(again.begin() == 3);  // shifting kept the checksum right
 }
 
+static void aSmallerBufferAfterAnUpdateStartsEmpty() {
+    // A sketch update shrank the buffer; the memory still says "full" from before. begin() must not
+    // read past the end of the new, smaller buffer.
+    uint8_t mem[512] = {};
+    HydroNodeBuffer big(mem, sizeof(mem));
+    big.begin();
+    for (uint32_t t = 1000; t < 1000 + 20 * 300; t += 300) big.add(t, TH, 2);
+    CHECK(big.usedBytes() > 200);
+    HydroNodeBuffer small(mem, 160);
+    CHECK(small.begin() == 0);
+    CHECK(small.empty());
+}
+
+static void aTimeThatDoesNotFitStaysUndated() {
+    uint8_t mem[256] = {};
+    HydroNodeBuffer b(mem, sizeof(mem));
+    b.begin();
+    CHECK(b.add(30, TH, 1, false, 7));  // measured 30 s after boot, before the clock was set
+    CHECK(b.shiftUnsynced(7, -1000) == 0);  // would land before 1970: not dated
+    HydroNodeBuffer::Round r;
+    CHECK(b.round(0, r) && !r.synced);
+    CHECK(b.dropStaleUnsynced(8) == 1);  // the next run drops it instead of sending time 0
+}
+
 static void tooSmallMemory() {
     uint8_t mem[8] = {};
     HydroNodeBuffer b(mem, sizeof(mem));
@@ -166,6 +190,8 @@ int main() {
     removesRounds();
     survivesARestartOnlyWhenIntact();
     roundsMeasuredBeforeTheTimeSyncGetDated();
+    aSmallerBufferAfterAnUpdateStartsEmpty();
+    aTimeThatDoesNotFitStaysUndated();
     tooSmallMemory();
     printf("buffer: %d checks, %d failed\n", checks, failures);
     return failures == 0 ? 0 : 1;

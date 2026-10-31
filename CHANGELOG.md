@@ -6,7 +6,7 @@ All notable changes to HydroNode-Library are documented here. The format follows
 
 ## [Unreleased]
 
-## [1.9.0] - 2026-10-30
+## [1.9.0] - 2026-11-01
 
 ### Added
 
@@ -54,6 +54,16 @@ All notable changes to HydroNode-Library are documented here. The format follows
 - Values are formatted by the library itself (half up on the exact float, like the backend),
   instead of `String(value, 2)`. The text is the same for every value the backend accepted before;
   `-0.0` now goes out as `-0.00`, which the backend reads back the same way.
+
+### Robustness of the buffer
+
+- A buffer kept in flash or RTC memory that a new sketch made smaller starts empty instead of
+  reading past its end.
+- When HydroNode refuses a block of stored rounds (HTTP 400), the next request carries half as many
+  until the broken round is found; only that one is dropped. Without memory for a request, fewer
+  rounds go next time and nothing is lost.
+- A round whose time cannot be set stays undated and is dropped on the next start instead of being
+  sent without a timestamp.
 
 ## [1.8.0] - 2026-10-09
 

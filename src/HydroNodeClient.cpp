@@ -1016,6 +1016,7 @@ int HydroNodeClient::flush(size_t maxRequests) {
         if (status < 200 || status >= 300 || done == 0) break;
     }
     flushing_ = false;
+    if (buffer_->empty()) flushLimit_ = 0;  // narrowed down and sent: back to full requests
     return status;
 }
 
@@ -1034,7 +1035,8 @@ int HydroNodeClient::flushOnce(size_t& done) {
     size_t total = buffer_->rounds();
     size_t chunk = 0, valueCount = 0;
     HydroNodeBuffer::Round r;
-    while (chunk < total && chunk < roundsPerRequest_ && buffer_->round(chunk, r)) {
+    size_t limit = flushLimit_ ? flushLimit_ : roundsPerRequest_;
+    while (chunk < total && chunk < limit && buffer_->round(chunk, r)) {
         if (!r.synced) break;  // measured before the clock was set and not dated yet
         if (chunk > 0 && valueCount + r.count > MAX_VALUES_PER_ROUNDS_REQUEST) break;
         valueCount += r.count;
@@ -1050,9 +1052,17 @@ int HydroNodeClient::flushOnce(size_t& done) {
         return 0;
     }
 
+    // Room for the whole request up front: a String that grows later can fail half way on a
+    // small board and leave broken JSON. Without the room, fewer rounds go next time; nothing is
+    // lost.
+    size_t estimate = 96 + chunk * 112 + valueCount * 72;
     std::vector<String> signatures(chunk);
     String body;
-    body.reserve(64 + chunk * 80 + valueCount * 36);
+    if (!body.reserve(estimate)) {
+        flushLimit_ = chunk > 1 ? chunk / 2 : 1;
+        dbg("flush: not enough memory for " + String((unsigned)chunk) + " rounds, fewer next time");
+        return ERR_STORED;
+    }
     HydroNodeValue values[HydroNodeBuffer::MAX_VALUES_PER_ROUND];
     for (size_t i = 0; i < chunk; i++) {
         buffer_->round(i, r);
@@ -1088,7 +1098,10 @@ int HydroNodeClient::flushOnce(size_t& done) {
         uint32_t sentAt = 0;
         if (!ensureTimeSynced(sentAt)) return ERR_TIME_NOT_SYNCED;
         String request;
-        request.reserve(body.length() + 72);
+        if (!request.reserve(body.length() + 96)) {
+            flushLimit_ = chunk > 1 ? chunk / 2 : 1;
+            return ERR_STORED;
+        }
         request += "{\"sensorId\":\"";
         request += sensorId_;
         request += "\",\"timestamp\":";
@@ -1114,10 +1127,16 @@ int HydroNodeClient::flushOnce(size_t& done) {
         return status;
     }
     if (status == 400) {
-        // The request itself is broken; sending it again cannot help.
-        dbg("flush: HydroNode refused the rounds (" + response + "), dropping them");
-        buffer_->removeFirst(chunk);
-        done = chunk;
+        // Something in this block is broken. Narrow it down instead of dropping the whole block:
+        // half as many next time, and only a single round that is still refused is dropped.
+        if (chunk > 1) {
+            flushLimit_ = chunk / 2;
+            dbg("flush: HydroNode refused " + String((unsigned)chunk) + " rounds (" + response + "), trying fewer");
+            return status;
+        }
+        dbg("flush: HydroNode refused a round (" + response + "), dropping it");
+        buffer_->removeFirst(1);
+        done = 1;
         return status;
     }
     if (status < 200 || status >= 300) return status;  // 401, 403, 429, 5xx: keep everything
