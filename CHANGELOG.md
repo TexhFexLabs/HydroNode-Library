@@ -6,6 +6,13 @@ All notable changes to HydroNode-Library are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- Example `EnumState`: a heater mode (Off, Eco, Boost) set by a `UINT32` command and reported back as a
+  value, so HydroNode confirms the state and shows it as a choice.
+- README "Switches and choices in the app": how commands and reported values become on/off and choice
+  data points in HydroNode. No API change.
+
 ## [1.9.0] - 2026-11-01
 
 ### Added

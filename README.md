@@ -334,6 +334,30 @@ A declined command is never run. Commands without a type (sent by older app vers
 
 **Untyped callbacks.** `on(name, void(JsonVariant))` receives any value without a type check, for commands that accept several types. Sketches written for version 1.2.0 and older (`hydro.on("pump", HydroNode::bindCallback<int>(pumpCallback))`) keep compiling and working.
 
+### Switches and choices in the app (data points)
+
+HydroNode shows every value your device sends as a **data point**. In the web app you can tell it how
+to read a value and which command sets it. The library needs nothing new for that: commands stay the
+typed callbacks above, and the state is a value you send with `sendValue()` or `sendValues()`.
+
+| You want | On the device | In HydroNode (data point settings) |
+|---|---|---|
+| An on/off switch whose state the app shows | `onBool("lamp", ...)` and send the state as `0`/`1`, e.g. `sendValue("LAMP", on ? 1 : 0)` | Read as: On/off. Command: name `lamp`, type `BOOL` |
+| A choice such as Off, Eco, Boost | `onUInt32("heater_mode", ...)` and send the index, e.g. `sendValue("HEATER_MODE", mode)` | Read as: Choice, options `0 Off`, `1 Eco`, `2 Boost`. Command: name `heater_mode`, type `UINT32` |
+| A switch without a reported state | `onBool("pump", ...)` only | Add, Actuator, pick the device, "Does the device report its state?" No |
+
+- **The type must match.** A choice is sent as the index of its option, so the callback is `onUInt32`
+  (or `onInt32`). An on/off switch is `onBool`. Another type is declined with *type mismatch*.
+- **Report the state you are in, not the one you were asked for.** After a command, send the state the
+  hardware really took. HydroNode shows the switch as *Pending* until the device confirms the command or
+  sends a matching value, and draws the reported values as a band under the charts. A value your device
+  refuses (out of range) keeps the old state, so the app never shows a state that is not real.
+- **Report changes made on the device too** (a button, a timer, a safety cut-off): send the new state
+  right away. Otherwise the app keeps showing the last commanded state.
+- Home Assistant shows such data points as `switch` and `select` (integration 0.6.0).
+
+The [`EnumState`](examples/EnumState/EnumState.ino) example is a complete heater with three modes.
+
 ### Fleet and OTA hooks (1.6.0)
 
 Every request now carries two headers for the HydroNode fleet view. A sketch needs nothing for that:
