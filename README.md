@@ -118,6 +118,7 @@ All examples are complete sketches — open them via *File → Examples → Hydr
 | **WiFiManagerSetup** | No hardcoded WiFi: captive portal (`HydroNode-Setup-XXXX`) for end-user WiFi configuration. |
 | **ExternalWiFi** | You own the WiFi lifecycle (custom reconnect logic); full error handling for every `sendValue()` result. |
 | **ActuatorControl** | Backend commands drive a pump and a fan via callbacks, with a safety limit for the pump run time. |
+| **EnumState** | A heater mode (Off, Eco, Boost) set from the app with `onUInt32()` and reported back with `sendValue()`, so the app confirms the state and draws it under the charts. |
 | **PowerThresholds** | Battery on an ADC divider, `HydroNodeBatteryGuard`, deep sleep. Interval and thresholds come from HydroNode and survive a power cut. |
 | **Transport_WiFi** | QuickStart written the 1.9.0 way: transport and client as two objects. Start here before swapping WiFi for something else. |
 | **Ethernet_ESP32** | Built-in Ethernet (WT32-ETH01, Olimex ESP32-POE): a cable instead of WiFi. |
