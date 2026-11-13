@@ -49,7 +49,7 @@ hydro.sendValue("TEMPERATURE", 21.5);
 - **Honest error reporting** — `sendValue()` returns the HTTP status code or a descriptive error code, so your firmware can retry intelligently.
 - **Lightweight** — no background tasks, no heap surprises, RAM-friendly.
 - **Battery thresholds** — `HydroNodeBatteryGuard` saves power below Save, turns WiFi off below Recovery and sleeps deep below Standby, like the HydroNode station. Interval and thresholds show up in HydroNode and can be changed there (`onSettings()`).
-- **Shows up in the fleet view** — since 1.6.0 every request says which firmware runs and how the board is doing (boot counter, reset reason, signal). Hooks for updates over the air are built in.
+- **Shows up under Devices and updates** — since 1.6.0 every request says which firmware runs and how the board is doing (boot counter, reset reason, signal). Hooks for updates over the air are built in.
 
 **Board support.** ESP32 (all variants) and ESP8266 (4 MB flash recommended) work out of the box: `HydroNode` brings WiFi, TLS with the bundled root certificates (mbedTLS on ESP32, BearSSL on ESP8266) and SNTP. Since 1.9.0 every other 32-bit board with a TLS-capable `Client` works through `HydroNodeClient`: RP2040 (Pico W), SAMD21/51 (MKR, Nano 33 IoT, Feather M0/M4), nRF52, STM32, Renesas (UNO R4 WiFi). AVR boards (UNO R3, Mega) have too little RAM for TLS. The ESP8266 has little RAM for TLS; keep the rest of the sketch lean.
 
@@ -58,6 +58,15 @@ hydro.sendValue("TEMPERATURE", 21.5);
 ### Arduino Library Manager (recommended)
 
 Arduino IDE → **Tools → Manage Libraries** → search for **HydroNode-Library** → Install. The IDE offers to install all dependencies automatically.
+
+### PlatformIO
+
+```ini
+lib_deps =
+    texhfexlabs/HydroNode-Library@^1.9.0
+```
+
+Or pinned to the Git tag: `https://github.com/TexhFexLabs/HydroNode-Library.git#1.9.0`.
 
 ### Manual
 
@@ -354,13 +363,14 @@ typed callbacks above, and the state is a value you send with `sendValue()` or `
   refuses (out of range) keeps the old state, so the app never shows a state that is not real.
 - **Report changes made on the device too** (a button, a timer, a safety cut-off): send the new state
   right away. Otherwise the app keeps showing the last commanded state.
-- Home Assistant shows such data points as `switch` and `select` (integration 0.6.0).
+- Home Assistant shows such data points as `switch` and `select` (integration 0.6.2, next release).
 
-The [`EnumState`](examples/EnumState/EnumState.ino) example is a complete heater with three modes.
+The [`EnumState`](examples/EnumState/EnumState.ino) example is a complete heater with three modes
+(in the next release, 1.9.1; until then copy it from this repository).
 
-### Fleet and OTA hooks (1.6.0)
+### Device and update hooks (1.6.0)
 
-Every request now carries two headers for the HydroNode fleet view. A sketch needs nothing for that:
+Every request now carries two headers for *Devices and updates* in HydroNode. A sketch needs nothing for that:
 
 ```
 X-Firmware: hydronode-lib/1.9.0 esp32c3
@@ -392,7 +402,7 @@ hydro.onResponseKey("ota", [](JsonVariantConst offer) {
 
 A GET has no body, so its signature covers the path with query and the timestamp: `X-Signature` = Base64(HMAC-SHA256(`/api/device-ota/v1/image?job=…` + timestamp)). The `Range` header is not signed.
 
-A sketch built on the library appears in the HydroNode fleet view as **own sketch**, with its health, restarts, signal and read errors. HydroNode updates only its universal firmware over the air (flashed with the device builder); the hooks above are the building blocks if a sketch wants its own update path. How the universal firmware uses them, including the offer format, verification and rollback, is described in [hydronode-firmware/docs/OTA.md](https://github.com/TexhFexLabs/hydronode-firmware/blob/main/docs/OTA.md). Changes per version: [CHANGELOG.md](CHANGELOG.md).
+A sketch built on the library appears under *Devices and updates* in HydroNode as **own sketch**, with its health, restarts, signal and read errors. HydroNode updates only its universal firmware over the air (flashed with the device builder); the hooks above are the building blocks if a sketch wants its own update path. How the universal firmware uses them, including the offer format, verification and rollback, is described in [hydronode-firmware/docs/OTA.md](https://github.com/TexhFexLabs/hydronode-firmware/blob/main/docs/OTA.md). Changes per version: [CHANGELOG.md](CHANGELOG.md).
 
 ### Device settings and battery thresholds (1.8.0)
 

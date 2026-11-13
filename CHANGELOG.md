@@ -6,6 +6,8 @@ All notable changes to HydroNode-Library are documented here. The format follows
 
 ## [Unreleased]
 
+Planned as 1.9.1 (example and README only, no API change).
+
 ### Added
 
 - Example `EnumState`: a heater mode (Off, Eco, Boost) set by a `UINT32` command and reported back as a
