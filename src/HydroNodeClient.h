@@ -38,7 +38,7 @@
 class HydroNodeClient {
 public:
     /** Library version, sent as `hydronode-lib/<version>` unless setFirmwareIdentity() says otherwise. */
-    static constexpr const char* LIB_VERSION = "1.9.0";
+    static constexpr const char* LIB_VERSION = "1.9.1";
 
     // Error codes (positive values are HTTP status codes).
     static constexpr int ERR_NETWORK_DOWN      = -1;  // the transport is not up (WiFi not joined, modem not attached)

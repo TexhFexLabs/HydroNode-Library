@@ -63,10 +63,10 @@ Arduino IDE → **Tools → Manage Libraries** → search for **HydroNode-Librar
 
 ```ini
 lib_deps =
-    texhfexlabs/HydroNode-Library@^1.9.0
+    texhfexlabs/HydroNode-Library@^1.9.1
 ```
 
-Or pinned to the Git tag: `https://github.com/TexhFexLabs/HydroNode-Library.git#1.9.0`.
+Or pinned to the Git tag: `https://github.com/TexhFexLabs/HydroNode-Library.git#1.9.1`.
 
 ### Manual
 
@@ -373,7 +373,7 @@ The [`EnumState`](examples/EnumState/EnumState.ino) example is a complete heater
 Every request now carries two headers for *Devices and updates* in HydroNode. A sketch needs nothing for that:
 
 ```
-X-Firmware: hydronode-lib/1.9.0 esp32c3
+X-Firmware: hydronode-lib/1.9.1 esp32c3
 X-Device-Status: boot=12;reset=poweron;uptime=45;rssi=-61;net=wifi;readErr=
 ```
 
@@ -381,7 +381,7 @@ X-Device-Status: boot=12;reset=poweron;uptime=45;rssi=-61;net=wifi;readErr=
 
 | Method | Purpose |
 |---|---|
-| `setFirmwareIdentity(product, version, flags)` | Replaces `hydronode-lib/1.9.0`. The universal firmware sends `hydronode/0.5.0 esp32c3 ota cfg=14`. The chip family is always added |
+| `setFirmwareIdentity(product, version, flags)` | Replaces `hydronode-lib/1.9.1`. The universal firmware sends `hydronode/0.5.0 esp32c3 ota cfg=14`. The chip family is always added |
 | `reportReadError("bme280")` / `clearReadErrors()` | Drivers that failed to read this round, sent as `readErr=bme280` |
 | `setResetReason("ota")` | Reports this reset reason instead of the chip's own (nullptr: the chip's again) |
 | `setExtraHeader(name, value)` / `clearExtraHeader(name)` | A header on every request until cleared, e.g. `X-Ota-State` |
