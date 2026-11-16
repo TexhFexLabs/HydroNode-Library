@@ -4,7 +4,15 @@ All notable changes to HydroNode-Library are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the library uses
 [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [1.9.1] - 2026-11-14
+
+### Added
+
+- Example `EnumState`: a heater mode (Off, Eco, Boost) set by a `UINT32` command and reported back as a
+  value, so HydroNode confirms the state and shows it as a choice.
+- README "Switches and choices in the app": how commands and reported values become on/off and choice
+  data points in HydroNode.
+- Version bump to `1.9.1` (`library.properties`, `HydroNodeClient.h`).
 
 ## [1.9.0] - 2026-11-01
 

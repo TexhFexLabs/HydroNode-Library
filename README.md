@@ -49,7 +49,7 @@ hydro.sendValue("TEMPERATURE", 21.5);
 - **Honest error reporting** — `sendValue()` returns the HTTP status code or a descriptive error code, so your firmware can retry intelligently.
 - **Lightweight** — no background tasks, no heap surprises, RAM-friendly.
 - **Battery thresholds** — `HydroNodeBatteryGuard` saves power below Save, turns WiFi off below Recovery and sleeps deep below Standby, like the HydroNode station. Interval and thresholds show up in HydroNode and can be changed there (`onSettings()`).
-- **Shows up in the fleet view** — since 1.6.0 every request says which firmware runs and how the board is doing (boot counter, reset reason, signal). Hooks for updates over the air are built in.
+- **Shows up under Devices and updates** — since 1.6.0 every request says which firmware runs and how the board is doing (boot counter, reset reason, signal). Hooks for updates over the air are built in.
 
 **Board support.** ESP32 (all variants) and ESP8266 (4 MB flash recommended) work out of the box: `HydroNode` brings WiFi, TLS with the bundled root certificates (mbedTLS on ESP32, BearSSL on ESP8266) and SNTP. Since 1.9.0 every other 32-bit board with a TLS-capable `Client` works through `HydroNodeClient`: RP2040 (Pico W), SAMD21/51 (MKR, Nano 33 IoT, Feather M0/M4), nRF52, STM32, Renesas (UNO R4 WiFi). AVR boards (UNO R3, Mega) have too little RAM for TLS. The ESP8266 has little RAM for TLS; keep the rest of the sketch lean.
 
@@ -58,6 +58,15 @@ hydro.sendValue("TEMPERATURE", 21.5);
 ### Arduino Library Manager (recommended)
 
 Arduino IDE → **Tools → Manage Libraries** → search for **HydroNode-Library** → Install. The IDE offers to install all dependencies automatically.
+
+### PlatformIO
+
+```ini
+lib_deps =
+    texhfexlabs/HydroNode-Library@^1.9.1
+```
+
+Or pinned to the Git tag: `https://github.com/TexhFexLabs/HydroNode-Library.git#1.9.1`.
 
 ### Manual
 
@@ -118,6 +127,7 @@ All examples are complete sketches — open them via *File → Examples → Hydr
 | **WiFiManagerSetup** | No hardcoded WiFi: captive portal (`HydroNode-Setup-XXXX`) for end-user WiFi configuration. |
 | **ExternalWiFi** | You own the WiFi lifecycle (custom reconnect logic); full error handling for every `sendValue()` result. |
 | **ActuatorControl** | Backend commands drive a pump and a fan via callbacks, with a safety limit for the pump run time. |
+| **EnumState** | A heater mode (Off, Eco, Boost) set from the app with `onUInt32()` and reported back with `sendValue()`, so the app confirms the state and draws it under the charts. |
 | **PowerThresholds** | Battery on an ADC divider, `HydroNodeBatteryGuard`, deep sleep. Interval and thresholds come from HydroNode and survive a power cut. |
 | **Transport_WiFi** | QuickStart written the 1.9.0 way: transport and client as two objects. Start here before swapping WiFi for something else. |
 | **Ethernet_ESP32** | Built-in Ethernet (WT32-ETH01, Olimex ESP32-POE): a cable instead of WiFi. |
@@ -333,12 +343,37 @@ A declined command is never run. Commands without a type (sent by older app vers
 
 **Untyped callbacks.** `on(name, void(JsonVariant))` receives any value without a type check, for commands that accept several types. Sketches written for version 1.2.0 and older (`hydro.on("pump", HydroNode::bindCallback<int>(pumpCallback))`) keep compiling and working.
 
-### Fleet and OTA hooks (1.6.0)
+### Switches and choices in the app (data points)
 
-Every request now carries two headers for the HydroNode fleet view. A sketch needs nothing for that:
+HydroNode shows every value your device sends as a **data point**. In the web app you can tell it how
+to read a value and which command sets it. The library needs nothing new for that: commands stay the
+typed callbacks above, and the state is a value you send with `sendValue()` or `sendValues()`.
+
+| You want | On the device | In HydroNode (data point settings) |
+|---|---|---|
+| An on/off switch whose state the app shows | `onBool("lamp", ...)` and send the state as `0`/`1`, e.g. `sendValue("LAMP", on ? 1 : 0)` | Read as: On/off. Command: name `lamp`, type `BOOL` |
+| A choice such as Off, Eco, Boost | `onUInt32("heater_mode", ...)` and send the index, e.g. `sendValue("HEATER_MODE", mode)` | Read as: Choice, options `0 Off`, `1 Eco`, `2 Boost`. Command: name `heater_mode`, type `UINT32` |
+| A switch without a reported state | `onBool("pump", ...)` only | Add, Actuator, pick the device, "Does the device report its state?" No |
+
+- **The type must match.** A choice is sent as the index of its option, so the callback is `onUInt32`
+  (or `onInt32`). An on/off switch is `onBool`. Another type is declined with *type mismatch*.
+- **Report the state you are in, not the one you were asked for.** After a command, send the state the
+  hardware really took. HydroNode shows the switch as *Pending* until the device confirms the command or
+  sends a matching value, and draws the reported values as a band under the charts. A value your device
+  refuses (out of range) keeps the old state, so the app never shows a state that is not real.
+- **Report changes made on the device too** (a button, a timer, a safety cut-off): send the new state
+  right away. Otherwise the app keeps showing the last commanded state.
+- Home Assistant shows such data points as `switch` and `select` (integration 0.6.2, next release).
+
+The [`EnumState`](examples/EnumState/EnumState.ino) example is a complete heater with three modes
+(in the next release, 1.9.1; until then copy it from this repository).
+
+### Device and update hooks (1.6.0)
+
+Every request now carries two headers for *Devices and updates* in HydroNode. A sketch needs nothing for that:
 
 ```
-X-Firmware: hydronode-lib/1.9.0 esp32c3
+X-Firmware: hydronode-lib/1.9.1 esp32c3
 X-Device-Status: boot=12;reset=poweron;uptime=45;rssi=-61;net=wifi;readErr=
 ```
 
@@ -346,7 +381,7 @@ X-Device-Status: boot=12;reset=poweron;uptime=45;rssi=-61;net=wifi;readErr=
 
 | Method | Purpose |
 |---|---|
-| `setFirmwareIdentity(product, version, flags)` | Replaces `hydronode-lib/1.9.0`. The universal firmware sends `hydronode/0.5.0 esp32c3 ota cfg=14`. The chip family is always added |
+| `setFirmwareIdentity(product, version, flags)` | Replaces `hydronode-lib/1.9.1`. The universal firmware sends `hydronode/0.5.0 esp32c3 ota cfg=14`. The chip family is always added |
 | `reportReadError("bme280")` / `clearReadErrors()` | Drivers that failed to read this round, sent as `readErr=bme280` |
 | `setResetReason("ota")` | Reports this reset reason instead of the chip's own (nullptr: the chip's again) |
 | `setExtraHeader(name, value)` / `clearExtraHeader(name)` | A header on every request until cleared, e.g. `X-Ota-State` |
@@ -367,7 +402,7 @@ hydro.onResponseKey("ota", [](JsonVariantConst offer) {
 
 A GET has no body, so its signature covers the path with query and the timestamp: `X-Signature` = Base64(HMAC-SHA256(`/api/device-ota/v1/image?job=…` + timestamp)). The `Range` header is not signed.
 
-A sketch built on the library appears in the HydroNode fleet view as **own sketch**, with its health, restarts, signal and read errors. HydroNode updates only its universal firmware over the air (flashed with the device builder); the hooks above are the building blocks if a sketch wants its own update path. How the universal firmware uses them, including the offer format, verification and rollback, is described in [hydronode-firmware/docs/OTA.md](https://github.com/TexhFexLabs/hydronode-firmware/blob/main/docs/OTA.md). Changes per version: [CHANGELOG.md](CHANGELOG.md).
+A sketch built on the library appears under *Devices and updates* in HydroNode as **own sketch**, with its health, restarts, signal and read errors. HydroNode updates only its universal firmware over the air (flashed with the device builder); the hooks above are the building blocks if a sketch wants its own update path. How the universal firmware uses them, including the offer format, verification and rollback, is described in [hydronode-firmware/docs/OTA.md](https://github.com/TexhFexLabs/hydronode-firmware/blob/main/docs/OTA.md). Changes per version: [CHANGELOG.md](CHANGELOG.md).
 
 ### Device settings and battery thresholds (1.8.0)
 
